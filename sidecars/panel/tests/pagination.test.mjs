@@ -93,3 +93,20 @@ test('reset during an in-flight read rejects late old records and permits a fres
  const pending=client.trajectory(id);await begun;client.resetTrajectories();release();await assert.rejects(pending,/重新连接/);assert.equal(client.reader.entries.size,0);
  assert.equal((await client.trajectory(id)).trajectory.steps.length,state.steps.length);
 });
+test('in-flight checkpoint bypasses idle cache and re-reads until completed',async()=>{
+ const {client,state,tick}=fixture();
+ state.steps.push({type:'CORTEX_STEP_TYPE_USER_INPUT',i:4},{type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_RUNNING',metadata:{startedAt:'2026-11-21T13:52:24Z'},i:5});
+ state.summary=summary(6,'CASCADE_RUN_STATUS_IDLE','v2');
+ await client.trajectory(id);
+ // Even when summary.status is already IDLE and lastModifiedTime has not changed,
+ // a running checkpoint must be re-fetched until it completes.
+ state.steps[5]={type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_DONE',metadata:{startedAt:'2026-11-21T13:52:24Z',completedAt:'2026-11-21T13:52:40Z'},checkpoint:{checkpointIndex:1,sessionSummary:4000},i:5};
+ state.calls=[];tick();
+ const done=await client.trajectory(id);
+ assert.equal(done.trajectory.steps[5].status,'CORTEX_STEP_STATUS_DONE');
+ assert.ok(state.calls.some(([m,b])=>m==='GetCascadeTrajectorySteps'&&b.stepOffset<=5));
+ // Once settled to DONE, subsequent idle polls hit the cache again.
+ state.calls=[];tick();
+ await client.trajectory(id);
+ assert.deepEqual(state.calls.map(([m])=>m),['GetAllCascadeTrajectories']);
+});

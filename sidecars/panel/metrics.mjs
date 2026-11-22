@@ -52,6 +52,95 @@ function unionSeconds(intervals) {
   return total / 1000;
 }
 
+function utf8ByteLength(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  if (typeof value === 'string') return Buffer.byteLength(value, 'utf8');
+  return null;
+}
+
+function isCompletedCheckpoint(step) {
+  if (!/CHECKPOINT/i.test(String(step?.type || ''))) return false;
+  const status = String(step?.status || '');
+  if (status) return /DONE|COMPLETED/i.test(status);
+  return Boolean(step?.metadata?.completedAt || step?.checkpoint);
+}
+
+function checkpointSummaryTokens(step) {
+  const usage = step?.metadata?.modelUsage;
+  if (usage && typeof usage === 'object') {
+    const out = tokenCount(usage.outputTokens);
+    const vis = tokenCount(usage.responseOutputTokens);
+    const think = tokenCount(usage.thinkingOutputTokens);
+    const response = vis ?? (out !== null && think !== null ? Math.max(0, out - think) : out);
+    if (response !== null && response > 0) return response;
+  }
+  const bytes = utf8ByteLength(step?.checkpoint?.sessionSummary);
+  if (bytes !== null && bytes > 0) return Math.ceil(bytes / 4);
+  return null;
+}
+
+function systemBreakdownTokens(generators, lastChat) {
+  const breakdown = lastChat?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown
+    || [...generators].reverse().find(g => g?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown)
+      ?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown;
+  const groups = breakdown?.groups;
+  if (!Array.isArray(groups) || !groups.length) return null;
+  let sum = 0, found = false;
+  for (const group of groups) {
+    if (!group || typeof group !== 'object') continue;
+    if (String(group.type || '') === 'TOKEN_TYPE_CHAT_MESSAGES') continue;
+    const n = tokenCount(group.numTokens);
+    if (n !== null) { sum += n; found = true; }
+  }
+  return found ? sum : null;
+}
+
+function latestContext(steps, generators, lastGen, lastChat) {
+  const rawMeta = lastChat?.chatStartMetadata?.contextWindowMetadata;
+  const model = lastChat?.modelDisplayName || lastChat?.responseModel || String(lastChat?.model || '');
+  const baseContext = contextMetrics(rawMeta, { model, sampledAt: lastChat?.chatStartMetadata?.createdAt });
+  if (!rawMeta || !Array.isArray(steps) || !steps.length) return baseContext;
+
+  let cpIndex = -1;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (isCompletedCheckpoint(steps[i])) { cpIndex = i; break; }
+  }
+  if (cpIndex < 0) return baseContext;
+  const cpStep = steps[cpIndex];
+
+  const genSteps = (lastGen?.stepIndices || []).filter(i => Number.isInteger(i) && i >= 0);
+  const lastGenMaxStep = genSteps.length ? Math.max(...genSteps) : -1;
+  const lastGenCpIdx = Number.isInteger(lastChat?.chatStartMetadata?.checkpointIndex) ? lastChat.chatStartMetadata.checkpointIndex : null;
+  const stepCpIdx = Number.isInteger(cpStep?.checkpoint?.checkpointIndex) ? cpStep.checkpoint.checkpointIndex : null;
+  const lastGenStartStep = tokenCount(lastChat?.chatStartMetadata?.startStepIndex);
+
+  let afterLastGen = false;
+  if (lastGenMaxStep >= 0) {
+    afterLastGen = cpIndex > lastGenMaxStep;
+  } else if (lastGenCpIdx !== null && stepCpIdx !== null) {
+    afterLastGen = stepCpIdx > lastGenCpIdx;
+  } else if (lastGenStartStep !== null) {
+    afterLastGen = cpIndex > lastGenStartStep;
+  } else {
+    const cpAt = Date.parse(cpStep?.metadata?.completedAt || cpStep?.metadata?.createdAt || '');
+    const chatAt = Date.parse(lastChat?.chatStartMetadata?.createdAt || '');
+    afterLastGen = Number.isFinite(cpAt) && Number.isFinite(chatAt) && cpAt > chatAt
+      && !steps.slice(cpIndex + 1).some(s => /PLANNER_RESPONSE/.test(String(s?.type || '')));
+  }
+  if (!afterLastGen) return baseContext;
+
+  const sysTokens = systemBreakdownTokens(generators, lastChat);
+  const summaryTokens = checkpointSummaryTokens(cpStep);
+  if (sysTokens === null && summaryTokens === null) return null;
+  const combined = (sysTokens ?? 0) + (summaryTokens ?? 0);
+  const preUsed = tokenCount(rawMeta.estimatedTokensUsed);
+  const usedTokens = preUsed !== null ? Math.min(preUsed, combined) : combined;
+  return contextMetrics(
+    { estimatedTokensUsed: usedTokens, maxContextTokens: rawMeta.maxContextTokens },
+    { model, sampledAt: cpStep?.metadata?.completedAt || cpStep?.metadata?.createdAt || lastChat?.chatStartMetadata?.createdAt },
+  );
+}
+
 export function trajectoryMetrics(response) {
   const trajectory = response.trajectory || {};
   const generators = trajectory.generatorMetadata || [];
@@ -131,7 +220,8 @@ export function trajectoryMetrics(response) {
   const tools = steps.filter(s => /SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type || '')) || s.metadata?.toolCall);
   const toolSeconds = unionSeconds(tools.map(s => [Date.parse(s.metadata.startedAt || s.metadata.createdAt), Date.parse(s.metadata.completedAt)]));
   const latest = samples.at(-1) || null;
-  const lastChat = [...generators].reverse().find(g => g.chatModel)?.chatModel;
+  const lastGen = [...generators].reverse().find(g => g.chatModel) || null;
+  const lastChat = lastGen?.chatModel;
   return {
     source: 'Antigravity request metadata', status: response.status || null,
     conversationId: trajectory.cascadeId || null,
@@ -143,10 +233,7 @@ export function trajectoryMetrics(response) {
     rateBasis: basisSamples.length && basisSamples.every(s => s.basis === 'response') ? 'response' : 'all-output',
     streamingSeconds, modelSeconds, toolSeconds, ttftSeconds: ttftSamples ? ttftSeconds / ttftSamples : null,
     latestShortSample: latest?.status === 'ok' && latest.duration < 1, model: latest?.model || null,
-    context: contextMetrics(lastChat?.chatStartMetadata?.contextWindowMetadata, {
-      model:lastChat?.modelDisplayName || lastChat?.responseModel || String(lastChat?.model || ''),
-      sampledAt:lastChat?.chatStartMetadata?.createdAt,
-    }),
+    context: latestContext(steps, generators, lastGen, lastChat),
     complete: Number(response.numTotalGeneratorMetadata ?? generators.length) === generators.length,
   };
 }

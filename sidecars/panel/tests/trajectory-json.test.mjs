@@ -36,6 +36,26 @@ test('step and generator page schemas preserve array offsets and distinct metada
  assert.deepEqual(project(JSON.stringify({steps:record.trajectory.steps})).steps.length,3);
  assert.equal(project(JSON.stringify({generatorMetadatas:record.trajectory.generatorMetadata})).generatorMetadatas.length,1);
 });
+test('checkpoint summary is projected to UTF-8 byte length without retaining text and non-checkpoint steps strip status/modelUsage',()=>{
+ const summaryText='PRIVATE SUMMARY 中文🧩\nline2';
+ const compacted={trajectory:{cascadeId:id,steps:[
+  {type:'CORTEX_STEP_TYPE_USER_INPUT',status:'CORTEX_STEP_STATUS_DONE',userInput:{text:'PRIVATE'}},
+  {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',status:'CORTEX_STEP_STATUS_DONE',metadata:{modelUsage:{outputTokens:'999'}},plannerResponse:{response:'ok'}},
+  {type:'CORTEX_STEP_TYPE_USER_INPUT',status:'CORTEX_STEP_STATUS_DONE',userInput:{text:'/compact'}},
+  {type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_DONE',metadata:{completedAt:'2026-11-21T14:03:09Z'},checkpoint:{checkpointIndex:3,includedStepIndexEnd:3,sessionSummary:summaryText}},
+ ],generatorMetadata:[{stepIndices:[1],chatModel:{modelDisplayName:'Gemini',usage:{inputTokens:'100',outputTokens:'200',responseOutputTokens:'200',apiProvider:'API_PROVIDER_GOOGLE_GEMINI',responseId:'r1'},streamingDuration:'2s',
+  chatStartMetadata:{startStepIndex:0,checkpointIndex:2,contextWindowMetadata:{estimatedTokensUsed:100000,maxContextTokens:256000,tokenBreakdown:{totalTokens:100000,groups:[{name:'PRIVATE GROUP',type:'TOKEN_TYPE_SYSTEM_PROMPT',source:'TOKEN_SOURCE_SYSTEM',numTokens:5000,children:[{name:'PRIVATE CHILD',numTokens:5000}]},{name:'Chat Messages',type:'TOKEN_TYPE_CHAT_MESSAGES',numTokens:95000}]}}}}}]},numTotalSteps:4,numTotalGeneratorMetadata:1,status:'CASCADE_RUN_STATUS_IDLE'};
+ const wire=JSON.stringify(compacted);
+ const oneChar=project(wire,1),chunked=project(wire,37);
+ assert.deepEqual(oneChar,chunked);
+ assert.ok(!JSON.stringify(oneChar).includes('PRIVATE'));
+ assert.equal(oneChar.trajectory.steps[1].status,undefined);
+ assert.equal(oneChar.trajectory.steps[1].metadata?.modelUsage,undefined);
+ assert.equal(oneChar.trajectory.steps[3].status,'CORTEX_STEP_STATUS_DONE');
+ assert.equal(oneChar.trajectory.steps[3].checkpoint.sessionSummary,Buffer.byteLength(summaryText,'utf8'));
+ assert.deepEqual(trajectoryMetrics(oneChar),trajectoryMetrics(compacted));
+ assert.equal(trajectoryMetrics(oneChar).context.usedTokens,5000+Math.ceil(Buffer.byteLength(summaryText,'utf8')/4));
+});
 test('a real HTTP step page above the old 32 MiB cap restores all metrics without whole-trajectory RPCs',async t=>{
  const head=JSON.stringify({steps:record.trajectory.steps}).slice(0,-1)+',"largeToolOutput":"',tail='"}',chunk='x'.repeat(64*1024);let wireBytes=0,scans=0;const methods=[];
  const server=createServer(async(req,res)=>{

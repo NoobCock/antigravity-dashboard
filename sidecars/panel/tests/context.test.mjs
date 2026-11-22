@@ -59,3 +59,29 @@ test('live lower context updates even when cumulative TPS history is protected',
   const current=await store.session(id,true);
   assert.equal(current.requests,3);assert.equal(current.context.usedFraction,.2);assert.equal(current.contextRestored,false);
 });
+test('context refreshes immediately after /compact checkpoint before the next turn begins',()=>{
+  const baseSteps=[
+    {type:'CORTEX_STEP_TYPE_USER_INPUT'},
+    {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE'},
+    {type:'CORTEX_STEP_TYPE_USER_INPUT'},
+  ];
+  const preGen={stepIndices:[1],chatModel:{modelDisplayName:'Gemini 4 Neon (High)',usage:{messageId:'m1',inputTokens:'2300',cacheReadTokens:'500000',responseOutputTokens:'350',apiProvider:'API_PROVIDER_GOOGLE_GEMINI'},streamingDuration:'2s',chatStartMetadata:{startStepIndex:0,checkpointIndex:2,contextWindowMetadata:{estimatedTokensUsed:520507,maxContextTokens:512000,tokenBreakdown:{totalTokens:520507,groups:[{type:'TOKEN_TYPE_SYSTEM_PROMPT',source:'TOKEN_SOURCE_SYSTEM',numTokens:3988},{type:'TOKEN_TYPE_TOOLS',source:'TOKEN_SOURCE_SYSTEM',numTokens:16445},{type:'TOKEN_TYPE_CHAT_MESSAGES',numTokens:500074}]}}}}};
+  // While compaction is still running, keep showing pre-compact context.
+  const running=trajectoryMetrics({trajectory:{cascadeId:id,steps:[...baseSteps,{type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_RUNNING',metadata:{startedAt:'2026-11-21T13:52:24Z'}}],generatorMetadata:[preGen]}});
+  assert.equal(running.context.usedTokens,520507);
+  // Once checkpoint completes with modelUsage, refresh immediately to system + summary output tokens.
+  const doneWithUsage=trajectoryMetrics({trajectory:{cascadeId:id,steps:[...baseSteps,{type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_DONE',metadata:{startedAt:'2026-11-21T13:52:24Z',completedAt:'2026-11-21T14:03:09Z',modelUsage:{outputTokens:'3949',thinkingOutputTokens:'48',responseOutputTokens:'3901'}},checkpoint:{checkpointIndex:3,includedStepIndexEnd:3,sessionSummary:'x'.repeat(13600)}}],generatorMetadata:[preGen]}});
+  assert.equal(doneWithUsage.context.usedTokens,3988+16445+3901);
+  assert.equal(doneWithUsage.context.maxTokens,512000);
+  assert.equal(doneWithUsage.context.sampledAt,'2026-11-21T14:03:09.000Z');
+  // When checkpoint has no modelUsage, fall back to sessionSummary UTF-8 byte estimate.
+  const doneWithSummary=trajectoryMetrics({trajectory:{cascadeId:id,steps:[...baseSteps,{type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_DONE',metadata:{completedAt:'2026-11-21T14:03:09Z'},checkpoint:{checkpointIndex:3,includedStepIndexEnd:3,sessionSummary:'摘要'.repeat(1000)}}],generatorMetadata:[preGen]}});
+  assert.equal(doneWithSummary.context.usedTokens,3988+16445+Math.ceil(Buffer.byteLength('摘要'.repeat(1000),'utf8')/4));
+  // Failed checkpoint must not overwrite pre-compact context.
+  const failed=trajectoryMetrics({trajectory:{cascadeId:id,steps:[...baseSteps,{type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_ERROR',metadata:{completedAt:'2026-11-21T14:03:09Z'}}],generatorMetadata:[preGen]}});
+  assert.equal(failed.context.usedTokens,520507);
+  // Once the next turn produces a generatorMetadata after the checkpoint, use its exact host estimate.
+  const nextGen={stepIndices:[5],chatModel:{modelDisplayName:'Gemini 4 Neon (High)',usage:{messageId:'m2',inputTokens:'20917',responseOutputTokens:'319',apiProvider:'API_PROVIDER_GOOGLE_GEMINI'},streamingDuration:'1s',chatStartMetadata:{startStepIndex:3,checkpointIndex:3,contextWindowMetadata:{estimatedTokensUsed:27420,maxContextTokens:512000}}}};
+  const nextTurn=trajectoryMetrics({trajectory:{cascadeId:id,steps:[...baseSteps,{type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_DONE',metadata:{completedAt:'2026-11-21T14:03:09Z'},checkpoint:{checkpointIndex:3,includedStepIndexEnd:3,sessionSummary:'x'.repeat(13600)}},{type:'CORTEX_STEP_TYPE_USER_INPUT'},{type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE'}],generatorMetadata:[preGen,nextGen]}});
+  assert.equal(nextTurn.context.usedTokens,27420);
+});

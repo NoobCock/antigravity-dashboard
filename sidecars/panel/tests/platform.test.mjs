@@ -158,3 +158,14 @@ test('failed or foreign-PID fallback cannot turn a stale log into a usable endpo
  assert.equal(calls.length,3);assert.deepEqual(rows[0].Ports,[]);
  assert.throws(()=>serverFromDiscovery('listening on random port at 1234 for HTTP\n',rows),/接口启动/);
 });
+
+test('Windows discovery retains elevated language_server rows whose CommandLine is null while still rejecting non-standalone rows',async()=>{
+ const rows=await discoverProcesses({platform:'win32',run:async(file)=>{
+  if(file==='powershell.exe')return {stdout:JSON.stringify([{ProcessId:56984,CommandLine:null},{ProcessId:13,CommandLine:'ls --sidecar'}])};
+  return {stdout:' TCP 127.0.0.1:57343 0.0.0.0:0 LISTENING 56984\n TCP 127.0.0.1:9999 0.0.0.0:0 LISTENING 13'};
+ }});
+ assert.equal(rows.length,1);
+ assert.equal(rows[0].ProcessId,56984);
+ assert.equal(rows[0].CommandLine,null);
+ assert.deepEqual(rows[0].Ports,[57343]);
+});

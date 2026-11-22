@@ -84,3 +84,19 @@ test('sidecar env credentials authenticate 2.34+ standalone processes without CL
  });
  assert.deepEqual(await client.call('GetUserStatus'),{ok:true});
 });
+
+test('elevated language_server with hidden CommandLine authenticates via verified sidecar env and reports permission error without token',()=>{
+ const log='listening on random port at 57342 for HTTPS (gRPC)\nlistening on random port at 57343 for HTTP\n';
+ const rows=[
+  {ProcessId:56984,CommandLine:null,Ports:[57342,57343]},
+  {ProcessId:10001,CommandLine:null,Ports:[41111]},
+ ];
+ assert.deepEqual(
+  serverFromDiscovery(log,rows,{ANTIGRAVITY_LS_ADDRESS:'https://127.0.0.1:57342',ANTIGRAVITY_CSRF_TOKEN:'elevated-tok'}),
+  {port:57343,csrf:'elevated-tok',pid:56984},
+ );
+ assert.throws(
+  ()=>serverFromDiscovery(log,[{ProcessId:56984,CommandLine:null,Ports:[57342,57343]}],{}),
+  /管理员权限/,
+ );
+});

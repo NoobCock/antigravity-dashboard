@@ -126,16 +126,30 @@ def install(panel_only=False, legacy_loader=False):
         module.build(module.unpatched_original(APP.read_bytes()))
     elif not panel_only:
         remove_verified_legacy_adapter()
+    PLUGIN.parent.mkdir(parents=True, exist_ok=True)
     PLUGIN.mkdir(parents=True, exist_ok=True)
-    for name in RUNTIME_FILES:
-        source, target = SOURCE / name, PLUGIN / name
-        if source.resolve() == target.resolve():
-            continue
-        if source.is_dir():
-            shutil.copytree(source, target, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.log', '.data', 'node_modules', 'data', 'history-v1', 'sdk'))
-        else:
-            shutil.copy2(source, target)
+    ignore = shutil.ignore_patterns('__pycache__', '*.pyc', '*.log', '.data', 'node_modules', 'data', 'history-v1', 'sdk')
+    to_copy = [name for name in RUNTIME_FILES if (SOURCE / name).resolve() != (PLUGIN / name).resolve()]
+    if to_copy:
+        staging = PLUGIN.parent / f'.{PLUGIN.name}.staging-{os.getpid()}'
+        if staging.exists():
+            shutil.rmtree(staging)
+        try:
+            staging.mkdir(parents=True, exist_ok=True)
+            for name in to_copy:
+                source, staged = SOURCE / name, staging / name
+                if source.is_dir():
+                    shutil.copytree(source, staged, ignore=ignore)
+                else:
+                    shutil.copy2(source, staged)
+            for root_dir, _, files in os.walk(staging):
+                rel_dir = Path(root_dir).relative_to(staging)
+                dest_dir = PLUGIN / rel_dir
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                for filename in files:
+                    os.replace(Path(root_dir) / filename, dest_dir / filename)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     if needs_adapter:
         subprocess.run([sys.executable, str(SOURCE / 'compat' / 'patch-loader.py'), '--apply'], check=True,
                        env={**os.environ, 'AG_PULSE_APP_ASAR': str(APP)})

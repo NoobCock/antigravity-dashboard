@@ -1,16 +1,36 @@
 // Incremental JSON projection for trajectory RPCs. Large prompts, tool results,
 // images and executor payloads are validated and skipped, never buffered.
-const scalar='scalar',nonempty='nonempty',presence='presence',calls='calls';
+const scalar='scalar',nonempty='nonempty',presence='presence',calls='calls',length='length';
 const usage=Object.fromEntries(['inputTokens','outputTokens','responseOutputTokens','thinkingOutputTokens','cacheReadTokens','cacheWriteTokens','apiProvider','responseId','messageId','model'].map(k=>[k,scalar]));
+const stepUsage={outputTokens:scalar,responseOutputTokens:scalar,thinkingOutputTokens:scalar};
 const duration={seconds:scalar,nanos:scalar};
+const breakdownGroup={type:scalar,source:scalar,numTokens:scalar};
 const generators={'*':{stepIndices:{'*':scalar},chatModel:{usage,model:scalar,modelDisplayName:scalar,responseModel:scalar,
  streamingDuration:duration,timeToFirstToken:duration,retryInfos:{'*':{usage}},
- chatStartMetadata:{createdAt:scalar,contextWindowMetadata:{estimatedTokensUsed:scalar,maxContextTokens:scalar}}}}};
-const steps={'*':{type:scalar,metadata:{createdAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence},
- plannerResponse:{response:nonempty,toolCalls:calls}}};
+ chatStartMetadata:{createdAt:scalar,startStepIndex:scalar,checkpointIndex:scalar,
+  contextWindowMetadata:{estimatedTokensUsed:scalar,maxContextTokens:scalar,
+   tokenBreakdown:{totalTokens:scalar,groups:{'*':breakdownGroup}}}}}}};
+const stepNode={type:scalar,status:scalar,metadata:{createdAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence,modelUsage:stepUsage},
+ checkpoint:{checkpointIndex:scalar,includedStepIndexStart:scalar,includedStepIndexEnd:scalar,sessionSummary:length},
+ plannerResponse:{response:nonempty,toolCalls:calls}};
+const steps={'*':stepNode};
 const schema={trajectory:{cascadeId:scalar,trajectoryId:scalar,steps,generatorMetadata:generators},steps,
  generatorMetadata:generators,generatorMetadatas:generators,status:scalar,numTotalSteps:scalar,numTotalGeneratorMetadata:scalar};
 const DROP=Symbol('discard');
+const retainedSize=v=>typeof v==='string'?v.length*2+32:v&&typeof v==='object'?Object.values(v).reduce((s,x)=>s+retainedSize(x),96):32;
+function addUtf8Bytes(token,text){
+ for(let i=0;i<text.length;i++){
+  const code=text.charCodeAt(i);
+  if(token.highSurrogate){
+   if(code>=0xdc00&&code<=0xdfff){token.byteLength+=4;token.highSurrogate=false;continue;}
+   token.byteLength+=3;token.highSurrogate=false;
+  }
+  if(code<=0x7f)token.byteLength+=1;
+  else if(code<=0x7ff)token.byteLength+=2;
+  else if(code>=0xd800&&code<=0xdbff)token.highSurrogate=true;
+  else token.byteLength+=3;
+ }
+}
 export class TrajectoryJson {
  constructor({maxRetainedBytes=8*1024*1024}={}){this.maxRetainedBytes=maxRetainedBytes;}
  stack=[];token=null;result=undefined;done=false;retained=0;
@@ -34,7 +54,13 @@ export class TrajectoryJson {
   }
   if(c==='}'||c===']'){
    if(!f||f.array!==(c===']')||!['commaOrEnd',f.array?'valueOrEnd':'keyOrEnd'].includes(f.expect))this.fail();
-   this.stack.pop();this.finishValue(f.node===presence?true:f.node===calls?(f.count?[{}]:[]):f.out||DROP);return;
+   this.stack.pop();
+   if(f.node===stepNode&&f.out&&!/CHECKPOINT/i.test(String(f.out.type||''))){
+    if(Object.hasOwn(f.out,'status')){this.retained=Math.max(0,this.retained-retainedSize(f.out.status));delete f.out.status;}
+    if(f.out.metadata&&Object.hasOwn(f.out.metadata,'modelUsage')){this.retained=Math.max(0,this.retained-retainedSize(f.out.metadata.modelUsage));delete f.out.metadata.modelUsage;}
+    if(Object.hasOwn(f.out,'checkpoint')){this.retained=Math.max(0,this.retained-retainedSize(f.out.checkpoint));delete f.out.checkpoint;}
+   }
+   this.finishValue(f.node===presence?true:f.node===calls?(f.count?[{}]:[]):f.out||DROP);return;
   }
   if(c===':'){if(!f||f.array||f.expect!=='colon')this.fail();f.expect='value';return;}
   if(c===','){if(!f||f.expect!=='commaOrEnd')this.fail();f.expect=f.array?'value':'key';return;}
@@ -44,10 +70,11 @@ export class TrajectoryJson {
   const f=this.stack.at(-1),key=f&&!f.array&&['key','keyOrEnd'].includes(f.expect);
   if(!key&&!this.valueAllowed())this.fail();
   const node=key?null:this.node();
-  this.token={kind:'string',key,node,buffer:'',overflow:false,escape:0,hex:'',any:false};
+  this.token={kind:'string',key,node,buffer:'',byteLength:0,highSurrogate:false,overflow:false,escape:0,hex:'',any:false};
  }
  stringPart(text){
   const t=this.token;if(t.node===nonempty&&/\S/u.test(text)||t.node===presence&&text.length)t.any=true;
+  if(t.node===length){addUtf8Bytes(t,text);return;}
   if(t.key||t.node===scalar||typeof t.node==='object'){
    if(t.overflow)return;t.buffer+=text;
    if(t.buffer.length>(t.key?1024:16384)){if(!t.key)throw new Error('会话统计字段超过采集上限');t.buffer='';t.overflow=true;}
@@ -59,6 +86,7 @@ export class TrajectoryJson {
   let value=DROP;
   if(t.node===nonempty)value=t.any?'1':'';
   else if(t.node===presence)value=t.any;
+  else if(t.node===length)value=t.byteLength+(t.highSurrogate?3:0);
   else if(t.node===scalar||typeof t.node==='object'){value=t.buffer;this.charge(value.length*2);}
   this.finishValue(value);
  }

@@ -1,6 +1,8 @@
 // Statistics-only acquisition. Host schemas accept offsets, not page sizes.
 // Cached immutable prefixes are local numeric/structural projections only.
 const settled=s=>/IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/.test(String(s||''));
+const settledCheckpoint=s=>/DONE|COMPLETED|CLEARED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/i.test(String(s||''));
+const pendingCheckpoint=s=>/CHECKPOINT/i.test(String(s?.type||''))&&(s?.status?!settledCheckpoint(s.status):Boolean((s?.metadata?.startedAt||s?.metadata?.createdAt)&&!s?.metadata?.completedAt));
 const GUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const unavailable=()=>new Error('后台已重新连接，请等待刷新');
 export class TrajectoryReader {
@@ -41,7 +43,8 @@ export class TrajectoryReader {
    const mark=JSON.stringify([count,summary.lastModifiedTime,summary.status,summary.lastUserInputStepIndex]);
    const old=entry.data;
    const same=old&&entry.mark===mark;
-   if(!force&&same&&settled(summary.status)&&summary.lastModifiedTime&&this.client.now()-entry.verifiedAt<this.idleRecheckMs){this.entries.delete(id);this.entries.set(id,entry);return old;}
+   const hasPendingCheckpoint=Boolean(old?.trajectory?.steps?.some(pendingCheckpoint));
+   if(!force&&same&&!hasPendingCheckpoint&&settled(summary.status)&&summary.lastModifiedTime&&this.client.now()-entry.verifiedAt<this.idleRecheckMs){this.entries.delete(id);this.entries.set(id,entry);return old;}
    // A changed settled history with no append may have been edited/compacted.
    const incremental=old&&!force&&count!==null&&count>=old.trajectory.steps.length&&(count>old.trajectory.steps.length||!settled(entry.summary?.status)||same);
    let stepOffset=0,metadataOffset=0;
@@ -56,11 +59,11 @@ export class TrajectoryReader {
      const associated=(gs.at(-1)?.stepIndices||[]).filter(i=>Number.isInteger(i)&&i>=0&&i<old.trajectory.steps.length&&!/USER_INPUT/.test(String(old.trajectory.steps[i]?.type||'')));
      stepOffset=associated.length?Math.min(...associated):old.trajectory.steps.length;
     }
-    // Background tools can finish after newer model requests have started.
-    // Refresh from the earliest unresolved timed tool as well as the last model.
-    const pendingTool=old.trajectory.steps.findIndex(s=>s?.metadata&&(s.metadata.startedAt||s.metadata.createdAt)&&!s.metadata.completedAt&&
-     (/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type||''))||s.metadata.toolCall));
-    if(pendingTool>=0)stepOffset=Math.min(stepOffset,pendingTool);
+    // Background tools and in-flight compactions can finish after newer model
+    // requests or after summary.status becomes idle. Refresh from the earliest one.
+    const pendingStep=old.trajectory.steps.findIndex(s=>pendingCheckpoint(s)||(s?.metadata&&(s.metadata.startedAt||s.metadata.createdAt)&&!s.metadata.completedAt&&
+     (/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type||''))||s.metadata.toolCall)));
+    if(pendingStep>=0)stepOffset=Math.min(stepOffset,pendingStep);
     if(gs.some(g=>!Array.isArray(g.stepIndices)||!g.stepIndices.length))metadataOffset=0;
    }
    const steps=incremental?old.trajectory.steps.slice(0,stepOffset):[];

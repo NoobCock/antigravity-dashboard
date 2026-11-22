@@ -25,10 +25,25 @@ export function parseLoopbackAddress(raw) {
   return { protocol: hasScheme ? parsed.protocol : null, port };
 }
 export function serverFromDiscovery(log, processes, env = {}) {
-  const rows = (Array.isArray(processes) ? processes : [processes]).filter(p => /--standalone\b/.test(p.CommandLine || ''));
+  const list = Array.isArray(processes) ? processes : [processes];
+  const standalone = list.filter(p => /--standalone\b/.test(p?.CommandLine || ''));
+  const envAddr = parseLoopbackAddress(env?.ANTIGRAVITY_LS_ADDRESS);
+  const logPorts = typeof log === 'string'
+    ? new Set([...log.matchAll(/listening on random port at (\d+) for HTTP(?:\s|$)/g)].map(m => Number(m[1])))
+    : new Set();
+  // On Windows, a non-elevated caller sees CommandLine as null/empty for an
+  // elevated language_server.exe. Accept such a candidate only when its live
+  // listening ports match the sidecar env or current log.
+  const hidden = !standalone.length
+    ? list.filter(p => p && Number.isSafeInteger(p.ProcessId) && p.ProcessId > 0 && (p.CommandLine === null || p.CommandLine === ''))
+    : [];
+  const matchedHidden = hidden.filter(p => {
+    const pPorts = new Set([p.Ports].flat().map(Number));
+    return Boolean(envAddr && pPorts.has(envAddr.port)) || [...logPorts].some(lp => pPorts.has(lp));
+  });
+  const rows = standalone.length ? standalone : matchedHidden.length ? matchedHidden : hidden;
   if (rows.length !== 1) throw new Error(rows.length ? '检测到多个 Antigravity 实例，请保留一个' : '未找到 Antigravity 桌面后台');
   const ports = new Set([rows[0].Ports].flat().map(Number));
-  const envAddr = parseLoopbackAddress(env?.ANTIGRAVITY_LS_ADDRESS);
   const envCsrf = typeof env?.ANTIGRAVITY_CSRF_TOKEN === 'string' && env.ANTIGRAVITY_CSRF_TOKEN.trim() ? env.ANTIGRAVITY_CSRF_TOKEN.trim() : null;
   const envMatchesProcess = Boolean(envAddr && ports.has(envAddr.port));
   const logPort = typeof log === 'string'
@@ -36,9 +51,9 @@ export function serverFromDiscovery(log, processes, env = {}) {
     : null;
   const port = logPort || (envMatchesProcess && envAddr.protocol !== 'https:' ? envAddr.port : null);
   if (!port) throw new Error('等待 Antigravity 本地接口启动');
-  const cliCsrf = rows[0].CommandLine.match(/--csrf_token(?:=|\s+)"?([^\s"]+)/)?.[1];
+  const cliCsrf = typeof rows[0].CommandLine === 'string' ? rows[0].CommandLine.match(/--csrf_token(?:=|\s+)"?([^\s"]+)/)?.[1] : null;
   const csrf = cliCsrf || (envMatchesProcess ? envCsrf : null);
-  if (!csrf) throw new Error('当前版本未提供可用的本地检测凭据');
+  if (!csrf) throw new Error(rows[0].CommandLine == null || rows[0].CommandLine === '' ? 'Antigravity 正在管理员权限下运行，当前进程无法读取本地凭据' : '当前版本未提供可用的本地检测凭据');
   return {port,csrf,pid:rows[0].ProcessId};
 }
 export class AntigravityClient {

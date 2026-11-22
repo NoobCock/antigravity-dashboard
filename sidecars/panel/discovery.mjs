@@ -62,10 +62,13 @@ export async function linuxPorts(pid, { proc = '/proc' } = {}) {
 
 export async function discoverProcesses({ platform = process.platform, run = exec, uid = process.getuid?.(), proc = '/proc' } = {}) {
   if (platform === 'win32') {
-    const script = "Get-CimInstance Win32_Process -Filter \"Name='language_server.exe'\" | Where-Object { $_.CommandLine -match '(?:^|\\s)--standalone(?:\\s|=|$)' } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress";
+    // When Antigravity runs elevated on Windows, non-elevated callers receive
+    // CommandLine = $null from Win32_Process; retain those rows so port/env
+    // matching in serverFromDiscovery can still verify the live PID.
+    const script = "Get-CimInstance Win32_Process -Filter \"Name='language_server.exe'\" | Where-Object { -not $_.CommandLine -or $_.CommandLine -match '(?:^|\\s)--standalone(?:\\s|=|$)' } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress";
     const {stdout}=await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,timeout:8000,maxBuffer:1048576});
     const parsed=stdout.trim()?JSON.parse(stdout.replace(/^\uFEFF/,'')):[];
-    const rows=(Array.isArray(parsed)?parsed:[parsed]).filter(row=>Number.isSafeInteger(row?.ProcessId)&&row.ProcessId>0&&/(?:^|\s)--standalone(?:\s|=|$)/.test(row.CommandLine||''));
+    const rows=(Array.isArray(parsed)?parsed:[parsed]).filter(row=>Number.isSafeInteger(row?.ProcessId)&&row.ProcessId>0&&(row.CommandLine==null||row.CommandLine===''||/(?:^|\s)--standalone(?:\s|=|$)/.test(row.CommandLine)));
     if(!rows.length)return [];
     // One native socket-table snapshot for all candidates, rather than a costly
     // Get-NetTCPConnection/CIM query for every language_server.exe process.
