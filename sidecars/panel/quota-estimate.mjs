@@ -119,15 +119,26 @@ function computeBreakdown(tokens, shares) {
 
 function computeDeltaCalibration({ points, windowRecords, usedFraction, remaining, now, endMs, pricingOptions, projectionMix }) {
   if (!Array.isArray(points) || !points.length) return { available: false, reason: 'collecting' };
+  // Filter out transient API dip checkpoints (where reported usedFraction temporarily
+  // dropped below an earlier checkpoint in the same window) so server jitter cannot
+  // artificially inflate deltaFraction.
+  const monotonic = [];
+  let maxFrac = -1;
+  for (const cp of points) {
+    if (!cp || !Number.isSafeInteger(cp.at) || cp.at >= endMs) continue;
+    if (typeof cp.usedFraction !== 'number' || !Number.isFinite(cp.usedFraction)) continue;
+    if (cp.usedFraction + 1e-6 < maxFrac) continue;
+    maxFrac = Math.max(maxFrac, cp.usedFraction);
+    monotonic.push(cp);
+  }
   const tiers = [
     { minFrac: 0.03, minReqs: 3, confidence: 'high' },
     { minFrac: 0.015, minReqs: 2, confidence: 'medium' },
     { minFrac: 0.01, minReqs: 1, confidence: 'low' },
   ];
   for (const tier of tiers) {
-    for (let i = points.length - 1; i >= 0; i--) {
-      const cp = points[i];
-      if (!cp || !Number.isSafeInteger(cp.at) || cp.at >= endMs) continue;
+    for (let i = monotonic.length - 1; i >= 0; i--) {
+      const cp = monotonic[i];
       const deltaFraction = usedFraction - cp.usedFraction;
       if (deltaFraction < tier.minFrac) continue;
       const slice = windowRecords.filter(r => r.at > cp.at && r.at <= endMs);
@@ -140,6 +151,9 @@ function computeDeltaCalibration({ points, windowRecords, usedFraction, remainin
       const estimatedRemainingTokens = remaining === 0
         ? 0
         : (mix?.blendedCostPer1M > 0 ? Math.round((remainingQuotaUsd / mix.blendedCostPer1M) * 1e6) : null);
+      const estimatedTotalTokens = mix?.blendedCostPer1M > 0
+        ? Math.round((totalQuotaUsd / mix.blendedCostPer1M) * 1e6)
+        : null;
       return {
         available: true,
         confidence: tier.confidence,
@@ -151,7 +165,10 @@ function computeDeltaCalibration({ points, windowRecords, usedFraction, remainin
         totalQuotaUsd: round(totalQuotaUsd, 2),
         remainingQuotaUsd: round(remainingQuotaUsd, 2),
         blendedCostPer1M: mix?.blendedCostPer1M ?? null,
+        cacheHitRate: mix?.total > 0 ? mix.cacheHitRate : null,
+        shares: mix?.shares ?? null,
         estimatedRemainingTokens,
+        estimatedTotalTokens,
         breakdown: computeBreakdown(estimatedRemainingTokens, mix?.shares),
       };
     }
@@ -233,7 +250,7 @@ export class QuotaEstimator {
     const last = bucket.points.at(-1);
     const shouldAdd = !last
       || usedFraction - last.usedFraction >= 0.005
-      || (at - last.at >= CHECKPOINT_INTERVAL_MS && requests > (last.requests || 0));
+      || (usedFraction >= last.usedFraction && at - last.at >= CHECKPOINT_INTERVAL_MS && requests > (last.requests || 0));
     if (!shouldAdd) return false;
     bucket.points.push({ at, usedFraction: round(usedFraction, 6), requests });
     if (bucket.points.length > MAX_CHECKPOINTS) {
@@ -252,10 +269,22 @@ export class QuotaEstimator {
 
     const estimatedGroups = groups.map(group => {
       const groupRecords = datedRecords.filter(r => modelBelongsToGroup(r.model, group, pricingOptions));
+      const weeklyBucket = group.windows?.weekly;
+      const weeklyResetMs = weeklyBucket?.available && !weeklyBucket.disabled && weeklyBucket.resetAt
+        ? Date.parse(weeklyBucket.resetAt)
+        : NaN;
+      const weeklyStartMs = Number.isFinite(weeklyResetMs) ? weeklyResetMs - WINDOW_MS.weekly : NaN;
+      const weeklyEndMs = Number.isFinite(weeklyResetMs) ? Math.min(now, weeklyResetMs) : now;
+      const weeklyWindowRecords = Number.isFinite(weeklyStartMs)
+        ? groupRecords.filter(r => r.at >= weeklyStartMs && r.at <= weeklyEndMs)
+        : [];
       const recent7d = groupRecords.filter(r => r.at >= now - RECENT_MS && r.at <= now);
       const recent30d = recent7d.length ? recent7d : groupRecords.filter(r => r.at >= now - FALLBACK_RECENT_MS && r.at <= now);
-      const recentBase = recent30d.length ? recent30d : groupRecords;
-      const recentWindowDays = recent7d.length ? 7 : recent30d.length ? 30 : null;
+      const usingWeeklyReset = weeklyWindowRecords.length > 0;
+      const recentBase = usingWeeklyReset ? weeklyWindowRecords : (recent30d.length ? recent30d : groupRecords);
+      const recentWindowDays = usingWeeklyReset ? null : (recent7d.length ? 7 : recent30d.length ? 30 : null);
+      const recentSinceAt = usingWeeklyReset ? new Date(weeklyStartMs).toISOString() : null;
+      const recentBasis = usingWeeklyReset ? 'weekly-reset' : 'rolling';
       const recentMix = summarizeRecords(recentBase, now, pricingOptions);
 
       const windows = {};
@@ -331,10 +360,10 @@ export class QuotaEstimator {
         const calibrated = remaining === 0 || (totalQuotaUsd !== null && totalQuotaUsd > 0);
         const remainingQuotaUsd = remaining === 0 ? 0 : calibrated ? Math.max(0, totalQuotaUsd * remaining) : null;
 
-        const projectionMix = recentMix.total > 0 && recentMix.blendedCostPer1M > 0
-          ? recentMix
-          : winSummary.total > 0 && winSummary.blendedCostPer1M > 0
-            ? winSummary
+        const projectionMix = winSummary.total > 0 && winSummary.blendedCostPer1M > 0
+          ? winSummary
+          : recentMix.total > 0 && recentMix.blendedCostPer1M > 0
+            ? recentMix
             : null;
 
         const estimatedRemainingTokens = remaining === 0
@@ -342,6 +371,9 @@ export class QuotaEstimator {
           : (remainingQuotaUsd !== null && projectionMix?.blendedCostPer1M > 0
             ? Math.round((remainingQuotaUsd / projectionMix.blendedCostPer1M) * 1e6)
             : null);
+        const estimatedTotalTokens = totalQuotaUsd !== null && projectionMix?.blendedCostPer1M > 0
+          ? Math.round((totalQuotaUsd / projectionMix.blendedCostPer1M) * 1e6)
+          : null;
         const breakdown = computeBreakdown(estimatedRemainingTokens, projectionMix?.shares);
 
         let activeModelRemainingTokens = null;
@@ -389,7 +421,10 @@ export class QuotaEstimator {
           totalQuotaUsd: totalQuotaUsd !== null ? round(totalQuotaUsd, 2) : null,
           remainingQuotaUsd: remainingQuotaUsd !== null ? round(remainingQuotaUsd, 2) : null,
           blendedCostPer1M: projectionMix?.blendedCostPer1M ?? null,
+          cacheHitRate: projectionMix?.total > 0 ? projectionMix.cacheHitRate : null,
+          shares: projectionMix?.shares ?? null,
           estimatedRemainingTokens,
+          estimatedTotalTokens,
           activeModelRemainingTokens,
           breakdown,
           delta,
@@ -451,6 +486,8 @@ export class QuotaEstimator {
         id: group.id,
         name: group.name,
         activeModel: activePricing && modelBelongsToGroup(activeModel, group, pricingOptions) ? activePricing.canonical : null,
+        recentBasis,
+        recentSinceAt,
         recentWindowDays,
         recentRequests: recentMix.requests,
         recentTokens: recentMix.total,

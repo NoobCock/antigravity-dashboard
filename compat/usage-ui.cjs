@@ -537,7 +537,9 @@ module.exports = function createUsageDashboard({root,language,setMarkup,hostLabe
       btn.addEventListener('click',()=>{estGroupId=g.id;renderEstimate();});return btn;
     }));
     if(group.recentRequests>0){
-      const spanText=group.recentWindowDays?w(`近 ${group.recentWindowDays} 天`,`${group.recentWindowDays}d`):w('全部','All');
+      const spanText=group.recentBasis==='weekly-reset'&&group.recentSinceAt
+        ?w(`自 ${fmtStamp(group.recentSinceAt)}`,`Since ${fmtStamp(group.recentSinceAt)}`)
+        :group.recentWindowDays?w(`近 ${group.recentWindowDays} 天`,`${group.recentWindowDays}d`):w('全部','All');
       const hitPct=((group.recentCacheHitRate??0)*100).toFixed(1)+'%';
       setMeta($('est-sub'),[spanText,w(`${full(group.recentRequests)} 次`,`${full(group.recentRequests)} req`),w(`${hitPct} 缓存`,`${hitPct} cache`),`~${fmtUsd(group.recentCostUsd)}`]);
     }else{
@@ -648,25 +650,35 @@ module.exports = function createUsageDashboard({root,language,setMarkup,hostLabe
       const sub=node('div','est-sub');
       let breakdown=null;
       if(q.calibrated){
-        let estTokens=null;
+        let estTokens=null,totalTokensEst=null;
         if(estBasis==='single'&&chosenModel){
           if(wd.remaining===0){estTokens=0;}
           else if(q.remUsd!=null&&singleRate){estTokens=Math.round((q.remUsd/singleRate)*1e6);}
+          if(q.totalUsd!=null&&singleRate){totalTokensEst=Math.round((q.totalUsd/singleRate)*1e6);}
           breakdown=buildBreakdown(estTokens,chosenModel.shares,singleHit,simMode==='actual');
           if(singleRate)setMeta(sub,[chosenModel.model,`$${singleRate.toFixed(3)}/1M`,`${(singleHit*100).toFixed(1)}%`]);
           else sub.textContent=chosenModel.model;
         }else{
-          const effectiveRate=q.useDelta&&simMode==='actual'?(wd.delta.blendedCostPer1M??mixRate):(mixRate??wd.blendedCostPer1M);
+          const effectiveRate=simMode==='actual'
+            ?(q.useDelta?(wd.delta.blendedCostPer1M??wd.blendedCostPer1M??mixRate):(wd.blendedCostPer1M??mixRate))
+            :(mixRate??wd.blendedCostPer1M);
+          const effectiveHit=simMode==='actual'
+            ?(q.useDelta?(wd.delta.cacheHitRate??wd.cacheHitRate??mixHit):(wd.cacheHitRate??mixHit))
+            :mixHit;
           if(wd.remaining===0){estTokens=0;}
           else if(simMode==='actual'&&q.useDelta){estTokens=wd.delta.estimatedRemainingTokens;}
           else if(simMode==='actual'&&!q.useDelta){estTokens=wd.estimatedRemainingTokens;}
           else if(q.remUsd!=null&&effectiveRate){estTokens=Math.round((q.remUsd/effectiveRate)*1e6);}
-          breakdown=simMode==='actual'?(q.useDelta?wd.delta.breakdown:wd.breakdown):buildBreakdown(estTokens,group.recentShares,mixHit,false);
-          if(effectiveRate)setMeta(sub,[`$${effectiveRate.toFixed(3)}/1M`,w(`${(mixHit*100).toFixed(1)}% 缓存`,`${(mixHit*100).toFixed(1)}% cache`)]);
+          if(simMode==='actual'&&q.useDelta){totalTokensEst=wd.delta.estimatedTotalTokens??(q.totalUsd!=null&&effectiveRate?Math.round((q.totalUsd/effectiveRate)*1e6):null);}
+          else if(simMode==='actual'&&!q.useDelta){totalTokensEst=wd.estimatedTotalTokens??(q.totalUsd!=null&&effectiveRate?Math.round((q.totalUsd/effectiveRate)*1e6):null);}
+          else if(q.totalUsd!=null&&effectiveRate){totalTokensEst=Math.round((q.totalUsd/effectiveRate)*1e6);}
+          breakdown=simMode==='actual'?(q.useDelta?wd.delta.breakdown:wd.breakdown):buildBreakdown(estTokens,wd.shares||group.recentShares,effectiveHit,false);
+          if(effectiveRate)setMeta(sub,[`$${effectiveRate.toFixed(3)}/1M`,w(`${(effectiveHit*100).toFixed(1)}% 缓存`,`${(effectiveHit*100).toFixed(1)}% cache`)]);
           else sub.textContent='';
         }
-        primary.append(document.createTextNode(estTokens===null?'—':estTokens===0?'0':'~'+compact(estTokens)),node('span','unit','Token'));
-        if(estTokens!==null)primary.title=full(estTokens)+' Token';
+        const unitLabel=totalTokensEst!=null?`/ ~${compact(totalTokensEst)} Token`:'Token';
+        primary.append(document.createTextNode(estTokens===null?'—':estTokens===0?'0':'~'+compact(estTokens)),node('span','unit',unitLabel));
+        if(estTokens!==null)primary.title=totalTokensEst!=null?`${full(estTokens)} / ${full(totalTokensEst)} Token`:full(estTokens)+' Token';
         sub.title=[...sub.children].map(n=>n.textContent).join(' | ')||sub.textContent;
       }else{
         primary.textContent='—';
@@ -782,12 +794,12 @@ module.exports = function createUsageDashboard({root,language,setMarkup,hostLabe
     const total=active.reduce((sum,g)=>sum+(g.windows[key].usedTokens||0),0);
     const hasCost=active.some(g=>typeof g.windows[key].usedCostUsd==='number');
     const costUsd=hasCost?active.reduce((sum,g)=>sum+(g.windows[key].usedCostUsd||0),0):null;
-    const entries=active.map(g=>({name:groupShortName(g),startAt:g.windows[key].windowStartAt,ms:Date.parse(g.windows[key].windowStartAt||''),tokens:g.windows[key].usedTokens||0,cost:g.windows[key].usedCostUsd}));
-    const valid=entries.filter(e=>Number.isFinite(e.ms)).sort((a,b)=>a.ms-b.ms);
-    const earliest=valid[0]||entries[0];
-    const stamp=earliest?.startAt?fmtStamp(earliest.startAt):null;
+    const entries=active.map(g=>({name:groupShortName(g),startAt:g.windows[key].windowStartAt,ms:Date.parse(g.windows[key].windowStartAt||''),tokens:g.windows[key].usedTokens||0,cost:g.windows[key].usedCostUsd,active:Boolean(g.activeModel)}));
+    const valid=entries.filter(e=>Number.isFinite(e.ms));
+    const primary=valid.slice().sort((a,b)=>(b.tokens-a.tokens)||(Number(b.active)-Number(a.active))||(b.ms-a.ms))[0]||entries[0];
+    const stamp=primary?.startAt?fmtStamp(primary.startAt):null;
     const detail=entries.length===1
-      ?(earliest?.startAt?fmtStamp(earliest.startAt):'')
+      ?(primary?.startAt?fmtStamp(primary.startAt):'')
       :entries.map(e=>`${e.name}${e.startAt?' ('+fmtStamp(e.startAt)+')':''}: ${compact(e.tokens)}${typeof e.cost==='number'?' ('+fmtCost(e.cost)+')':''}`).join('\n');
     const head=full(total)+' Token'+(costUsd!==null?' ('+fmtCost(costUsd)+')':'');
     return {total,costUsd,stamp,title:head+(detail?'\n'+detail:'')};

@@ -679,10 +679,10 @@ module.exports = function installAgPulseInlineWidget() {
         hidden($(`${name}-est-usd-row`),estW.totalQuotaUsd==null);
         if(estW.totalQuotaUsd!=null)text(`${name}-est-usd`,`~${fmtUsd(estW.remainingQuotaUsd)} / ~${fmtUsd(estW.totalQuotaUsd)}`);
         hidden($(`${name}-est-tok-row`),false);
-        const tok=estW.estimatedRemainingTokens;
-        text(`${name}-est-tok`,tok==null?'—':tok===0?'0 tok':`~${compact(tok)} tok`);
+        const tok=estW.estimatedRemainingTokens,totTok=estW.estimatedTotalTokens;
+        text(`${name}-est-tok`,tok==null?'—':tok===0?(totTok!=null?`0 / ~${compact(totTok)}`:'0 tok'):(totTok!=null?`~${compact(tok)} / ~${compact(totTok)}`:`~${compact(tok)} tok`));
         const tokEl=$(`${name}-est-tok`);
-        if(tokEl)tokEl.title=tok!=null?`${count(tok)} tok${estW.calibrationSource==='prior-window'?' ('+t('estPrior')+')':''}`:'';
+        if(tokEl)tokEl.title=tok!=null?`${count(tok)}${totTok!=null?' / '+count(totTok):''} tok${estW.calibrationSource==='prior-window'?' ('+t('estPrior')+')':''}`:'';
       }else if(estW?.available){
         hidden($(`${name}-est-usd-row`),true);
         hidden($(`${name}-est-tok-row`),false);

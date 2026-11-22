@@ -368,6 +368,84 @@ test('QuotaEstimator exposes windowStartAt and computes checkpoint-based increme
   });
   assert.equal(withOverride.groups[0].windows.weekly.delta.deltaCostUsd, 60);
   assert.equal(withOverride.groups[0].windows.weekly.delta.totalQuotaUsd, 600);
+  await estimator.writeQueue;
+});
+
+test('weekly remaining tokens uses actual weekly reset window mix instead of pre-reset rolling 7d records, and ignores jitter dips', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ag-quota-reset-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const estimator = new QuotaEstimator(dir);
+  const acct = scope('reset-align@example.test');
+  const weeklyStart = Date.parse('2026-11-21T09:00:52.000Z');
+  const weeklyReset = new Date(weeklyStart + WINDOW_MS.weekly).toISOString();
+  const now = Date.parse('2026-11-22T17:00:00.000Z');
+  const reset5h = new Date(now + 2 * 3600e3).toISOString();
+
+  // Heavy pre-reset usage 2 days before weeklyStart (still within rolling 7d, but BEFORE actual weekly reset!)
+  const preReset = [
+    { id: 'pre1', at: weeklyStart - 2 * 86400e3, model: 'Gemini 4 Neon (XHigh)', uncached: 50_000_000, cacheRead: 0, cacheWrite: 0, output: 5_000_000 }, // very expensive $4.09/1M
+  ];
+  // Post-reset usage inside [weeklyStart, now]: cheap high-cache Flash traffic (100M total tokens, $20 cost => $0.20/1M)
+  // At 50% used (remaining = 0.50), remaining tokens MUST be ~100M (not distorted by pre-reset Neon!)
+  const postReset = [
+    { id: 'post1', at: weeklyStart + 3600e3, model: 'Gemini 3.8 Flash (High)', uncached: 10_000_000, cacheRead: 88_000_000, cacheWrite: 0, output: 2_000_000 },
+  ];
+
+  const groups = [{
+    id: 'gemini',
+    name: 'Gemini Models',
+    windows: {
+      '5h': { available: true, remaining: 1.0, resetAt: reset5h, disabled: false },
+      weekly: { available: true, remaining: 0.5, resetAt: weeklyReset, disabled: false },
+    },
+  }];
+
+  const res = await estimator.estimate({ scope: acct, groups, records: [...preReset, ...postReset], now });
+  const g = res.groups[0];
+  assert.equal(g.recentBasis, 'weekly-reset');
+  assert.equal(g.recentSinceAt, new Date(weeklyStart).toISOString());
+  assert.equal(g.recentTokens, 100_000_000);
+  const ww = g.windows.weekly;
+  assert.equal(ww.windowStartAt, new Date(weeklyStart).toISOString());
+  assert.equal(ww.usedTokens, 100_000_000);
+  // Remaining 50% at identical post-reset mix must equal usedTokens (100M) and totalTokens must equal 200M
+  assert.ok(Math.abs(ww.estimatedRemainingTokens - 100_000_000) < 100_000, `Expected ~100M, got ${ww.estimatedRemainingTokens}`);
+  assert.ok(Math.abs(ww.estimatedTotalTokens - 200_000_000) < 200_000, `Expected ~200M, got ${ww.estimatedTotalTokens}`);
+
+  // When current weekly window has 0 records yet, fall back to rolling 7d
+  const emptyRes = await estimator.estimate({ scope: acct, groups, records: preReset, now });
+  assert.equal(emptyRes.groups[0].recentBasis, 'rolling');
+  assert.equal(emptyRes.groups[0].recentWindowDays, 7);
+
+  // Jitter dip checkpoint must not poison delta calibration
+  const tA = weeklyStart + 7200e3;
+  const tDip = tA + 1800e3;
+  const tB = tDip + 1800e3;
+  const jitterState = await estimator.load(acct);
+  jitterState.checkpoints['gemini:weekly'] = {
+    resetAt: weeklyReset,
+    points: [
+      { at: tA, usedFraction: 0.50, requests: 1 },
+      { at: tDip, usedFraction: 0.48, requests: 2 }, // transient API dip
+    ],
+  };
+  const recsWithDelta = [
+    ...postReset,
+    ...Array.from({ length: 4 }, (_, i) => ({
+      id: `d${i}`, at: tA + 60_000 + i * 60_000, model: 'Gemini 4 Neon (XHigh)',
+      uncached: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 0, // $3 each = $12 total
+    })),
+  ];
+  const jitterRes = await estimator.estimate({
+    scope: acct,
+    groups: [{ ...groups[0], windows: { ...groups[0].windows, weekly: { available: true, remaining: 0.46, resetAt: weeklyReset, disabled: false } } }],
+    records: recsWithDelta,
+    now: tB,
+  });
+  // Must use tA (0.50 -> 0.54, Δ=0.04, $12 => $300) rather than dipped tDip (0.48 -> 0.54, Δ=0.06)
+  assert.equal(jitterRes.groups[0].windows.weekly.delta.sinceAt, new Date(tA).toISOString());
+  assert.equal(jitterRes.groups[0].windows.weekly.delta.deltaFraction, 0.04);
+  await estimator.writeQueue;
 });
 
 test('usage-ui and inline-widget compile cleanly with custom period and quota estimate features', () => {

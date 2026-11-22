@@ -87,10 +87,10 @@ function renderQuota(window, prefix) {
       usdRow.hidden = estW.totalQuotaUsd == null;
       if (estW.totalQuotaUsd != null) $(`${prefix}-est-usd`).textContent = `~${fmtUsd(estW.remainingQuotaUsd)} / ~${fmtUsd(estW.totalQuotaUsd)}`;
       tokRow.hidden = false;
-      const tok = estW.estimatedRemainingTokens;
+      const tok = estW.estimatedRemainingTokens, totTok = estW.estimatedTotalTokens;
       const tokEl = $(`${prefix}-est-tok`);
-      tokEl.textContent = tok == null ? '—' : tok === 0 ? '0 tok' : `~${compact(tok)} tok`;
-      tokEl.title = tok != null ? `${count(tok)} tok${estW.calibrationSource === 'prior-window' ? ' (' + t('estPrior') + ')' : ''}` : '';
+      tokEl.textContent = tok == null ? '—' : tok === 0 ? (totTok != null ? `0 / ~${compact(totTok)}` : '0 tok') : (totTok != null ? `~${compact(tok)} / ~${compact(totTok)}` : `~${compact(tok)} tok`);
+      tokEl.title = tok != null ? `${count(tok)}${totTok != null ? ' / ' + count(totTok) : ''} tok${estW.calibrationSource === 'prior-window' ? ' (' + t('estPrior') + ')' : ''}` : '';
     } else if (estW?.available) {
       usdRow.hidden = true;
       tokRow.hidden = false;
