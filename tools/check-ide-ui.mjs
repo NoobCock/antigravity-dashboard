@@ -56,7 +56,7 @@ try{
  await page.evaluate(quality=>{testQuality=quality;},quality);
  await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar').shadowRoot.getElementById('latest-rate').textContent==='Timing uncertain');
  await page.keyboard.press('Escape');await page.locator('[data-card=speed]').click();
- assert.equal(await page.locator('#rate-note').textContent(),'Calculation: response tokens ÷ streaming time; session TPS is time-weighted.');
+ assert.equal(await page.locator('#rate-note').textContent(),'Response ÷ stream time');
  assert.equal(await page.locator('#tps').textContent(),'—');
  await page.screenshot({path:join(repo,'.data/ide/tps-quality-en.png')});
  await page.evaluate(()=>{testQuality=null;});
@@ -65,16 +65,16 @@ try{
  await page.locator('[data-card=context]').click();await page.locator('#card-language-zh').click();await page.waitForTimeout(150);assert.equal((await state()).lang,'zh-CN');await page.keyboard.press('Escape');
  await page.evaluate(quality=>{testQuality=quality;},quality);
  await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar').shadowRoot.getElementById('latest-rate').textContent==='计时异常');
- await page.locator('[data-card=speed]').click();assert.equal(await page.locator('#rate-note').textContent(),'统计方式：正文 Token ÷ 流式时长；会话 TPS 按总时长加权。');
+ await page.locator('[data-card=speed]').click();assert.equal(await page.locator('#rate-note').textContent(),'正文 ÷ 流式时长');
  await page.screenshot({path:join(repo,'.data/ide/tps-quality-zh.png')});await page.keyboard.press('Escape');await page.evaluate(()=>{testQuality=null;});
  // A different child/subagent/history ID must never win over the input owner.
  await page.evaluate(other=>{const decoy={props:{cascadeId:other},__k:[]};testOwner.__k.unshift(decoy);},other);
  assert.equal((await state()).id,id);
  await page.evaluate(()=>{testOwner.props.cascadeId=null;});await page.waitForTimeout(1400);assert.equal((await state()).id,null);assert.equal((await state()).tps,'—');assert.equal((await state()).icons.filter(e=>!e.hidden).length,3);
- assert.match(await page.locator('#context-note').textContent(),/当前为新对话/);assert.equal(await page.locator('#five-balance').textContent(),'80.0%');
+ assert.match(await page.locator('#context-note').textContent(),/发送消息后显示统计/);assert.equal(await page.locator('#five-balance').textContent(),'80.0%');
  await page.evaluate(other=>{testOwner.props.cascadeId=other;},other);await page.waitForTimeout(1400);assert.equal((await state()).id,other);
  await page.evaluate(()=>{delete document.querySelector('.panel').__k;});await page.waitForTimeout(1400);assert.equal((await state()).id,null);assert.equal((await state()).tps,'—');
- assert.equal(await page.evaluate(()=>window.__agPulseSurface.conversationState(window.__agPulseSurface.findComposer()).status),'unavailable');assert.match(await page.locator('#context-note').textContent(),/此请求暂无/);
+ assert.equal(await page.evaluate(()=>window.__agPulseSurface.conversationState(window.__agPulseSurface.findComposer()).status),'unavailable');assert.match(await page.locator('#context-note').textContent(),/暂无上下文统计/);
  assert.deepEqual(errors,[]);results.push({trustedTypesEnforced:true,narrow,wide,cardsInteractive:true,nativeModelPreserved:true,stablePolling:stable,emptyAndSwitchedConversationsIsolated:true,missingPrivateAPIUnavailable:true});
  await mkdir(join(repo,'.data/ide'),{recursive:true});await writeFile(join(repo,'.data/ide/ui-report.json'),JSON.stringify({results,pageErrors:errors},null,2));console.log(JSON.stringify({results,pageErrors:errors},null,2));
 }finally{await browser.close();await new Promise(r=>server.close(r));}
