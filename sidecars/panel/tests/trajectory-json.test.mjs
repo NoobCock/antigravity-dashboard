@@ -56,6 +56,26 @@ test('checkpoint summary is projected to UTF-8 byte length without retaining tex
  assert.deepEqual(trajectoryMetrics(oneChar),trajectoryMetrics(compacted));
  assert.equal(trajectoryMetrics(oneChar).context.usedTokens,5000+Math.ceil(Buffer.byteLength(summaryText,'utf8')/4));
 });
+test('single-attempt retryInfos and redundant step timestamps are stripped while multi-attempt retry-scope detection is preserved',()=>{
+ const multi={trajectory:{cascadeId:id,steps:[
+  {type:'CORTEX_STEP_TYPE_USER_INPUT',metadata:{createdAt:'2026-11-24T01:00:00Z',startedAt:'2026-11-24T01:00:00Z',completedAt:'2026-11-24T01:00:01Z'}},
+  {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',metadata:{createdAt:'2026-11-24T01:00:02Z',startedAt:'2026-11-24T01:00:02Z',completedAt:'2026-11-24T01:00:04Z'},plannerResponse:{response:'ok'}},
+  {type:'CORTEX_STEP_TYPE_RUN_COMMAND',metadata:{createdAt:'2026-11-24T01:00:04Z',startedAt:'2026-11-24T01:00:05Z',completedAt:'2026-11-24T01:00:10Z',toolCall:{}}},
+ ],generatorMetadata:[
+  {stepIndices:[1],chatModel:{modelDisplayName:'Gemini',streamingDuration:'2s',usage:{inputTokens:'100',outputTokens:'200',responseOutputTokens:'200',apiProvider:'API_PROVIDER_GOOGLE_GEMINI',responseId:'r1'},retryInfos:[{usage:{inputTokens:'100',outputTokens:'200',responseOutputTokens:'200',responseId:'r1'}}]}},
+  {stepIndices:[1],chatModel:{modelDisplayName:'Gemini',streamingDuration:'2s',usage:{inputTokens:'100',outputTokens:'200',responseOutputTokens:'200',apiProvider:'API_PROVIDER_GOOGLE_GEMINI',responseId:'r2'},retryInfos:[{usage:{inputTokens:'100',outputTokens:'50',responseOutputTokens:'50',responseId:'r2-a'}},{usage:{inputTokens:'100',outputTokens:'200',responseOutputTokens:'200',responseId:'r2-b'}}]}},
+ ]},numTotalSteps:3,numTotalGeneratorMetadata:2,status:'CASCADE_RUN_STATUS_IDLE'};
+ const projected=project(JSON.stringify(multi),19);
+ assert.equal(projected.trajectory.steps[0].metadata,undefined);
+ assert.deepEqual(projected.trajectory.steps[1].metadata,{createdAt:'2026-11-24T01:00:02Z'});
+ assert.deepEqual(projected.trajectory.steps[2].metadata,{startedAt:'2026-11-24T01:00:05Z',completedAt:'2026-11-24T01:00:10Z',toolCall:true});
+ assert.equal(projected.trajectory.generatorMetadata[0].chatModel.retryInfos,undefined);
+ assert.equal(projected.trajectory.generatorMetadata[1].chatModel.retryInfos.length,2);
+ assert.equal(projected.trajectory.generatorMetadata[1].chatModel.retryInfos[0].usage.inputTokens,undefined);
+ assert.deepEqual(trajectoryMetrics(projected),trajectoryMetrics(multi));
+ assert.deepEqual(usageRecords(projected,id),usageRecords(multi,id));
+ assert.equal(trajectoryMetrics(projected).timingReasons['retry-scope'],1);
+});
 test('a real HTTP step page above the old 32 MiB cap restores all metrics without whole-trajectory RPCs',async t=>{
  const head=JSON.stringify({steps:record.trajectory.steps}).slice(0,-1)+',"largeToolOutput":"',tail='"}',chunk='x'.repeat(64*1024);let wireBytes=0,scans=0;const methods=[];
  const server=createServer(async(req,res)=>{

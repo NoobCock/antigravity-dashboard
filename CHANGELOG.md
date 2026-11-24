@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 — 2026-11-24
+
+- Fix long conversations stalling on stale saved history after an unexpected Antigravity shutdown/restart by pruning single-attempt `retryInfos` (keeping only output fields when multiple retry attempts exist) and redundant step timestamps in `sidecars/panel/trajectory-json.mjs`, and aligning `TrajectoryJson`'s per-page internal retained estimator (`16 MiB`) with `TrajectoryReader`'s `8 MiB` serialized JSON budget.
+
 ## 0.9.0 — 2026-11-24
 
 - Add automatic GitHub Releases (`/releases/latest`) update checking and self-updating in `sidecars/panel/updater.mjs`, wired to `RuntimeUi`, `/api/update`, and a compact footer control in the Context card (`Check` / `Update` / `Auto`). Verifies HTTPS allowlisted download/redirect hosts, `.sha256` digest, CRC32, ZIP path safety, and stages runtime files atomically while preserving user data and protecting `.git` checkouts; restarts the sidecar cleanly for live hot-reload.

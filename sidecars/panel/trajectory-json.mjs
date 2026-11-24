@@ -5,11 +5,13 @@ const usage=Object.fromEntries(['inputTokens','outputTokens','responseOutputToke
 const stepUsage={outputTokens:scalar,responseOutputTokens:scalar,thinkingOutputTokens:scalar};
 const duration={seconds:scalar,nanos:scalar};
 const breakdownGroup={type:scalar,source:scalar,numTokens:scalar};
-const generators={'*':{stepIndices:{'*':scalar},chatModel:{usage,model:scalar,modelDisplayName:scalar,responseModel:scalar,
- streamingDuration:duration,timeToFirstToken:duration,retryInfos:{'*':{usage}},
+const chatModelNode={usage,model:scalar,modelDisplayName:scalar,responseModel:scalar,
+ streamingDuration:duration,timeToFirstToken:duration,retryInfos:{'*':{usage:stepUsage}},
  chatStartMetadata:{createdAt:scalar,startStepIndex:scalar,checkpointIndex:scalar,
   contextWindowMetadata:{estimatedTokensUsed:scalar,maxContextTokens:scalar,
-   tokenBreakdown:{totalTokens:scalar,groups:{'*':breakdownGroup}}}}}}};
+   tokenBreakdown:{totalTokens:scalar,groups:{'*':breakdownGroup}}}}};
+const generators={'*':{stepIndices:{'*':scalar},chatModel:chatModelNode}};
+const TOOL_STEP_RE=/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i;
 const stepNode={type:scalar,status:scalar,metadata:{createdAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence,modelUsage:stepUsage},
  checkpoint:{checkpointIndex:scalar,includedStepIndexStart:scalar,includedStepIndexEnd:scalar,sessionSummary:length},
  plannerResponse:{response:nonempty,toolCalls:calls}};
@@ -32,7 +34,7 @@ function addUtf8Bytes(token,text){
  }
 }
 export class TrajectoryJson {
- constructor({maxRetainedBytes=8*1024*1024}={}){this.maxRetainedBytes=maxRetainedBytes;}
+ constructor({maxRetainedBytes=16*1024*1024}={}){this.maxRetainedBytes=maxRetainedBytes;}
  stack=[];token=null;result=undefined;done=false;retained=0;
  fail(){throw new Error('Antigravity 接口返回了无法解析的数据');}
  charge(n){if((this.retained+=n)>this.maxRetainedBytes)throw new Error('会话统计数据超过采集上限');}
@@ -55,10 +57,38 @@ export class TrajectoryJson {
   if(c==='}'||c===']'){
    if(!f||f.array!==(c===']')||!['commaOrEnd',f.array?'valueOrEnd':'keyOrEnd'].includes(f.expect))this.fail();
    this.stack.pop();
-   if(f.node===stepNode&&f.out&&!/CHECKPOINT/i.test(String(f.out.type||''))){
-    if(Object.hasOwn(f.out,'status')){this.retained=Math.max(0,this.retained-retainedSize(f.out.status));delete f.out.status;}
-    if(f.out.metadata&&Object.hasOwn(f.out.metadata,'modelUsage')){this.retained=Math.max(0,this.retained-retainedSize(f.out.metadata.modelUsage));delete f.out.metadata.modelUsage;}
-    if(Object.hasOwn(f.out,'checkpoint')){this.retained=Math.max(0,this.retained-retainedSize(f.out.checkpoint));delete f.out.checkpoint;}
+   if(f.node===stepNode&&f.out){
+    const typeStr=String(f.out.type||'');
+    const isCheckpoint=/CHECKPOINT/i.test(typeStr);
+    if(!isCheckpoint){
+     if(Object.hasOwn(f.out,'status')){this.retained=Math.max(0,this.retained-retainedSize(f.out.status));delete f.out.status;}
+     if(Object.hasOwn(f.out,'checkpoint')){this.retained=Math.max(0,this.retained-retainedSize(f.out.checkpoint));delete f.out.checkpoint;}
+     const meta=f.out.metadata;
+     if(meta&&typeof meta==='object'){
+      if(Object.hasOwn(meta,'modelUsage')){this.retained=Math.max(0,this.retained-retainedSize(meta.modelUsage));delete meta.modelUsage;}
+      const isPlanner=/PLANNER_RESPONSE/.test(typeStr);
+      const isTool=TOOL_STEP_RE.test(typeStr)||Boolean(meta.toolCall);
+      if(!isPlanner&&!isTool){
+       this.retained=Math.max(0,this.retained-retainedSize(meta));delete f.out.metadata;
+      }else{
+       if(isPlanner&&!isTool){
+        if(Object.hasOwn(meta,'startedAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.startedAt));delete meta.startedAt;}
+        if(Object.hasOwn(meta,'completedAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.completedAt));delete meta.completedAt;}
+       }
+       if(isTool&&!isPlanner&&meta.startedAt&&Object.hasOwn(meta,'createdAt')){
+        this.retained=Math.max(0,this.retained-retainedSize(meta.createdAt));delete meta.createdAt;
+       }
+       if(!Object.keys(meta).length){this.retained=Math.max(0,this.retained-96);delete f.out.metadata;}
+      }
+     }
+    }
+   }
+   if(f.node===chatModelNode&&f.out&&Array.isArray(f.out.retryInfos)){
+    const attempts=f.out.retryInfos.filter(info=>info?.usage);
+    if(attempts.length<=1){
+     this.retained=Math.max(0,this.retained-retainedSize(f.out.retryInfos));
+     delete f.out.retryInfos;
+    }
    }
    this.finishValue(f.node===presence?true:f.node===calls?(f.count?[{}]:[]):f.out||DROP);return;
   }
