@@ -315,7 +315,168 @@ module.exports = function installAgPulseInlineWidget() {
   // the pointer departs. Only keyboard-visible focus keeps a card engaged.
   // The explicit first-use action moves focus into language choices. Keep
   // that guided destination available until the user chooses or leaves it.
-  const cardEngaged=()=>Boolean(root?.activeElement?.matches(':focus-visible')||(guideOpened&&!guideDismissed&&cardName==='context'&&root?.activeElement?.matches('[data-language-choice]'))||groupMenu||node?.matches(':hover')||root?.querySelector('.card:not([hidden]):hover'));
+  const isModelLocked=el=>Boolean(el?.isConnected&&(el.getAttribute('aria-disabled')==='true'||el.disabled===true));
+  let watchedModel=null,usageSubTimer=null,tierSubTimer=null,activeTierKey=null,queuedSwitch=null;
+  const findModelSelectorContext=el=>{
+    if(!el?.isConnected)return null;
+    try{
+      const fk=Object.keys(el).find(k=>k.startsWith('__reactFiber$'));
+      let f=fk?el[fk]:null;
+      for(let i=0;i<22&&f;i++,f=f.return){
+        const v=f.memoizedProps?.value;
+        if(v&&typeof v==='object'&&typeof v.setSelectedModel==='function'&&Array.isArray(v.modelOptions))return v;
+      }
+    }catch{}
+    return null;
+  };
+  const shortModelLabel=label=>String(label||'').replace(/^Gemini\s+/i,'').replace(/^Claude\s+/i,'').replace(/\s*\(([^)]+)\)\s*$/,' $1').replace(/\bXHigh\b/i,'XHigh').trim();
+  const renderQueuedChip=()=>{
+    const chip=$('queued-model-chip');if(!chip)return;
+    const valid=Boolean(queuedSwitch&&(!queuedSwitch.conversationId||queuedSwitch.conversationId===conversationId()));
+    hidden(chip,!valid);
+    if(!valid)return;
+    text('queued-model-label',`→ ${queuedSwitch.shortLabel}`);
+    chip.title=t('modelsQueuedTip',{model:queuedSwitch.label});
+    chip.setAttribute('aria-label',chip.title);
+  };
+  const queueModelSwitch=option=>{
+    if(!option)return;
+    const ctx=findModelSelectorContext(watchedModel);
+    const cur=ctx?.selectedModel;
+    if(cur&&((option.value!=null&&cur.value===option.value)||(option.modelId&&cur.modelId===option.modelId))){
+      queuedSwitch=null;
+    }else if(queuedSwitch&&((option.value!=null&&queuedSwitch.value===option.value)||(option.modelId&&queuedSwitch.modelId===option.modelId))){
+      queuedSwitch=null;
+    }else{
+      queuedSwitch={conversationId:conversationId(),value:option.value,modelId:option.modelId||null,label:option.label,shortLabel:shortModelLabel(option.label)};
+    }
+    renderQueuedChip();
+    renderModelsCard();
+    if(activeTierKey&&$('models-tier-card')&&!$('models-tier-card').hidden)renderTierSub(activeTierKey);
+    fit();
+  };
+  const flushQueuedModelSwitch=()=>{
+    if(!queuedSwitch)return;
+    const cid=conversationId();
+    if(queuedSwitch.conversationId&&cid&&queuedSwitch.conversationId!==cid){queuedSwitch=null;renderQueuedChip();return;}
+    if(!watchedModel?.isConnected||isModelLocked(watchedModel))return;
+    const ctx=findModelSelectorContext(watchedModel);
+    if(!ctx||ctx.lockedReason!==undefined)return;
+    const target=(ctx.modelOptions||[]).find(m=>!m.disabled&&((queuedSwitch.value!=null&&m.value===queuedSwitch.value)||(queuedSwitch.modelId&&m.modelId===queuedSwitch.modelId)||m.label===queuedSwitch.label));
+    queuedSwitch=null;
+    renderQueuedChip();
+    if(target){
+      try{ctx.setSelectedModel(target);}catch{}
+    }
+    if(cardName==='models')hide();
+    fit();
+  };
+  const hideTierSub=()=>{clearTimeout(tierSubTimer);tierSubTimer=null;activeTierKey=null;const sub=$('models-tier-card');if(sub)cardVisibility(sub,false);};
+  const hideUsageSub=()=>{clearTimeout(usageSubTimer);usageSubTimer=null;const sub=$('models-usage-card');if(sub)cardVisibility(sub,false);};
+  const positionSideSub=(sub,anchorRow,maxW=268)=>{
+    const card=$('models-card');
+    if(!card||card.hidden||!sub||sub.hidden||!anchorRow)return;
+    const cr=card.getBoundingClientRect(),rr=anchorRow.getBoundingClientRect();
+    const width=Math.min(maxW,window.innerWidth-24);style(sub,'width',`${width}px`);
+    const rightSpace=window.innerWidth-cr.right-16,leftSpace=cr.left-16;
+    const left=rightSpace>=width?cr.right+6:leftSpace>=width?cr.left-width-6:Math.max(12,window.innerWidth-width-12);
+    style(sub,'left',`${Math.max(12,left)}px`);
+    style(sub,'max-height',`${Math.max(120,window.innerHeight-24)}px`);
+    style(sub,'overflow-y','auto');
+    const h=sub.offsetHeight||160;
+    const desiredTop=Math.min(window.innerHeight-h-12,Math.max(12,rr.top-6));
+    style(sub,'top',`${desiredTop}px`);
+  };
+  const positionUsageSub=()=>{
+    const sub=$('models-usage-card'),row=$('models-view-usage');
+    if(!sub||sub.hidden||!row)return;
+    positionSideSub(sub,row,268);
+  };
+  const showUsageSub=()=>{
+    clearTimeout(usageSubTimer);usageSubTimer=null;
+    hideTierSub();
+    const sub=$('models-usage-card');
+    if(disposed||cardName!=='models'||!sub)return;
+    cardVisibility(sub,true);
+    positionUsageSub();
+  };
+  const scheduleHideUsageSub=()=>{
+    clearTimeout(usageSubTimer);
+    usageSubTimer=setTimeout(()=>{
+      usageSubTimer=null;
+      const row=$('models-view-usage'),sub=$('models-usage-card');
+      if(!row?.matches(':hover')&&!sub?.matches(':hover'))hideUsageSub();
+    },160);
+  };
+  let tierAnchorRow=null,tierMap=new Map();
+  const renderTierSub=key=>{
+    const body=$('models-tier-body'),title=$('models-tier-title');
+    const groupEntry=tierMap.get(key);
+    if(!body||!title||!groupEntry)return;
+    title.textContent=groupEntry.name;
+    body.replaceChildren();
+    const ctx=findModelSelectorContext(watchedModel);
+    const cur=ctx?.selectedModel;
+    for(const opt of groupEntry.options){
+      const isCur=Boolean(cur&&((opt.value!=null&&cur.value===opt.value)||(opt.modelId&&cur.modelId===opt.modelId)));
+      const isQ=Boolean(queuedSwitch&&((opt.value!=null&&queuedSwitch.value===opt.value)||(opt.modelId&&queuedSwitch.modelId===opt.modelId)));
+      const btn=document.createElement('button');btn.type='button';btn.className='model-row model-tier-btn';
+      if(isCur)btn.dataset.active='true';
+      if(isQ)btn.dataset.queued='true';
+      const lbl=document.createElement('span');lbl.className='model-row-name';lbl.textContent=opt.tierLabel;
+      const right=document.createElement('span');right.className='model-row-right';
+      if(isQ){const tag=document.createElement('span');tag.className='model-q-tag';tag.textContent=t('modelsQueued');right.append(tag);}
+      else if(isCur){
+        const chk=document.createElementNS('http://www.w3.org/2000/svg','svg');chk.setAttribute('viewBox','0 0 16 16');chk.setAttribute('aria-hidden','true');chk.setAttribute('class','model-check');
+        const p=document.createElementNS('http://www.w3.org/2000/svg','path');p.setAttribute('d','m3.5 8.5 3 3 6-6.5');chk.append(p);right.append(chk);
+      }
+      btn.append(lbl,right);
+      btn.addEventListener('click',()=>queueModelSwitch(opt));
+      body.append(btn);
+    }
+  };
+  const showTierSub=(key,rowEl)=>{
+    clearTimeout(tierSubTimer);tierSubTimer=null;
+    hideUsageSub();
+    const sub=$('models-tier-card');
+    if(disposed||cardName!=='models'||!sub||!tierMap.has(key))return;
+    activeTierKey=key;tierAnchorRow=rowEl;
+    renderTierSub(key);
+    cardVisibility(sub,true);
+    positionSideSub(sub,rowEl,190);
+  };
+  const scheduleHideTierSub=()=>{
+    clearTimeout(tierSubTimer);
+    tierSubTimer=setTimeout(()=>{
+      tierSubTimer=null;
+      const sub=$('models-tier-card');
+      if(!tierAnchorRow?.matches(':hover')&&!sub?.matches(':hover'))hideTierSub();
+    },160);
+  };
+  const onModelEnter=()=>{
+    if(!isModelLocked(watchedModel)||usageDashboard?.isOpen)return;
+    clearTimeout(hoverTimer);
+    if(isWarm()){clearTimeout(openTimer);openTimer=null;show('models');return;}
+    clearTimeout(openTimer);
+    const target=watchedModel,anchor=node,editor=composer?.editor,conversation=conversationId();
+    openTimer=setTimeout(()=>{
+      openTimer=null;
+      if(disposed||node!==anchor||!anchor?.isConnected||watchedModel!==target||!target?.isConnected||!target.matches(':hover')||!isModelLocked(target)||composer?.editor!==editor||conversationId()!==conversation)return;
+      show('models');
+    },HOVER_DELAY);
+  };
+  const onModelLeave=()=>{
+    clearTimeout(openTimer);openTimer=null;
+    if(cardName==='models')scheduleHide();
+  };
+  function bindModelTrigger(el){
+    const next=el||null;
+    if(watchedModel===next)return;
+    if(watchedModel){watchedModel.removeEventListener('pointerenter',onModelEnter);watchedModel.removeEventListener('pointerleave',onModelLeave);}
+    watchedModel=next;
+    if(watchedModel){watchedModel.addEventListener('pointerenter',onModelEnter);watchedModel.addEventListener('pointerleave',onModelLeave);}
+  }
+  const cardEngaged=()=>Boolean(root?.activeElement?.matches(':focus-visible')||(guideOpened&&!guideDismissed&&cardName==='context'&&root?.activeElement?.matches('[data-language-choice]'))||groupMenu||node?.matches(':hover')||(cardName==='models'&&isModelLocked(watchedModel)&&watchedModel?.matches(':hover'))||root?.querySelector('.card:not([hidden]):hover,.models-sub:not([hidden]):hover'));
   function cardVisibility(element,visible){
     if(visible){hidden(element,false);if(element.hasAttribute('popover')&&!element.matches(':popover-open'))element.showPopover();}
     else {if(element.hasAttribute('popover')&&element.matches(':popover-open'))element.hidePopover();hidden(element,true);}
@@ -323,6 +484,7 @@ module.exports = function installAgPulseInlineWidget() {
   function hide({keepWarm=false}={}){
     clearTimeout(openTimer);openTimer=null;
     clearTimeout(hoverTimer);hoverTimer=null;
+    hideUsageSub();hideTierSub();
     if(!keepWarm)warmUntil=0;
     changingCards=true;
     try{closeGroup();cardName=null;for(const e of root?.querySelectorAll('[data-card]')||[])e.setAttribute('aria-expanded','false');for(const e of root?.querySelectorAll('.card')||[])cardVisibility(e,false);}
@@ -331,7 +493,7 @@ module.exports = function installAgPulseInlineWidget() {
   }
   function show(name){
     if(disposed||!node?.isConnected||changingCards||usageDashboard?.isOpen||node.dataset.layout==='blocked')return;
-    if(cardName!==name)closeGroup();
+    if(cardName!==name){closeGroup();if(name!=='models'){hideUsageSub();hideTierSub();}}
     clearTimeout(hoverTimer);hoverTimer=null;
     clearTimeout(openTimer);openTimer=null;
     cardName=name;warmUntil=0;
@@ -372,17 +534,22 @@ module.exports = function installAgPulseInlineWidget() {
   function position(){
     positionGuide();
     if(!cardName)return;
-    const button=root.querySelector(`[data-card="${cardName}"]`),card=$(`${cardName}-card`),rect=button.getBoundingClientRect();
-    const width=Math.min(310,window.innerWidth-24);style(card,'width',`${width}px`);
+    const isModels=cardName==='models';
+    const button=isModels?watchedModel:root.querySelector(`[data-card="${cardName}"]`),card=$(`${cardName}-card`);
+    if(!button?.isConnected||!card||(isModels&&!isModelLocked(button))){if(isModels)hide();return;}
+    const rect=button.getBoundingClientRect();
+    const width=Math.min(isModels?300:310,window.innerWidth-24);style(card,'width',`${width}px`);
     const roomAbove=rect.top-21,roomBelow=window.innerHeight-rect.bottom-21;
     style(card,'overflow-y','auto');
-    style(card,'left',`${Math.min(window.innerWidth-width-12,Math.max(12,rect.left+rect.width/2-width/2))}px`);
+    const desiredLeft=isModels?rect.left:rect.left+rect.width/2-width/2;
+    style(card,'left',`${Math.min(window.innerWidth-width-12,Math.max(12,desiredLeft))}px`);
     // scrollHeight includes clipped content. Expanding maxHeight to measure it
     // on every poll used to reset scrollTop and then shrink the card again.
     const height=card.scrollHeight+card.offsetHeight-card.clientHeight;
     const useAbove=height<=roomAbove || roomAbove>=roomBelow;
     style(card,'max-height',`${Math.max(80,useAbove?roomAbove:roomBelow)}px`);
     style(card,'top',`${Math.max(12,useAbove?rect.top-card.offsetHeight-9:rect.bottom+9)}px`);
+    if(isModels){positionUsageSub();if(activeTierKey&&tierAnchorRow)positionSideSub($('models-tier-card'),tierAnchorRow,190);}
   }
   function positionGuide(){
     const tip=$('language-guide'),button=root?.querySelector('[data-card="context"]');
@@ -488,6 +655,7 @@ module.exports = function installAgPulseInlineWidget() {
     }
     const found=findComposer();
     if(!found){
+      bindModelTrigger(null);
       stopDensityMotion();densityFrame=null;densityProbe=null;composer=null;resizeObserver?.disconnect();
       if(node){
         hide();usageDashboard?.dispose();usageDashboard=null;themeController?.dispose();themeController=null;
@@ -503,6 +671,7 @@ module.exports = function installAgPulseInlineWidget() {
     composer=found;
     if(syncConversation())render();
     const {editor,model,row,branch}=found;
+    bindModelTrigger(model);
     if(node)node.dataset.scope=found.kind;
     if(node?.isConnected&&node.parentElement===row&&node.previousElementSibling===branch)return;
     if(node){stopDensityMotion();densityFrame=null;densityProbe=null;hide();row.insertBefore(node,branch.nextSibling);observeComposer();themeController?.dispose();themeController=theme.attach(node,{embedded:true});if(data?.theme)themeController.setHostTheme(data.theme);fit();position();return;}
@@ -527,6 +696,7 @@ module.exports = function installAgPulseInlineWidget() {
     @media(prefers-reduced-motion:reduce){.refresh[aria-busy=true] svg{animation:none;opacity:.65}}
     </style><div class="bar" data-i18n-aria="strip" aria-label="Dashboard statistics">
       <span class="dot" id="dot" title="Connecting"></span>
+      <button type="button" class="chip queued-chip" id="queued-model-chip" hidden><span id="queued-model-label"></span><span class="queued-x" aria-hidden="true">×</span></button>
       <button class="chip" data-card="speed" data-i18n-aria="session" hidden aria-controls="speed-card" aria-expanded="false">${svg('speed')}<span class="rounds dim" id="rounds"></span><strong id="tps">—</strong><span>tok/s</span></button>
       <button class="chip" data-card="cache" data-i18n-aria="cacheTitle" hidden aria-controls="cache-card" aria-expanded="false">${svg('cache')}<span class="cache-total" id="cache-total">— tok</span><i class="chip-sep" aria-hidden="true"></i><span data-i18n="cache">Cache hit</span><strong id="cache-rate">—</strong></button>
       <button class="chip" data-card="context" data-i18n-aria="context" hidden aria-controls="context-card" aria-expanded="false"><span class="context-ring" id="context-ring" aria-hidden="true"></span><span class="context-label" data-i18n="contextShort">Ctx</span><strong id="context-percent">—</strong></button>
@@ -572,7 +742,50 @@ module.exports = function installAgPulseInlineWidget() {
       #guide-open{display:flex;align-items:center;justify-content:space-between;gap:12px;text-align:left;width:calc(100% + 8px);margin:5px -4px -3px;padding:4px;line-height:16px}
       #guide-open>span{display:grid;gap:1px}#guide-open span[lang]{font-size:10px;color:var(--pulse-muted)}#guide-open svg{width:14px;height:14px;flex:none}
       #guide-save-note:empty,#language-save-note:empty{display:none}#guide-save-note,#language-save-note{color:var(--pulse-warning)}
+      .models-card{padding:10px 6px 6px}.models-card .heading{margin:0 8px 6px;padding-bottom:7px;border-bottom:0;font-size:11px;font-weight:500;color:var(--pulse-muted)}
+      .models-ro-tag{font-size:10px;font-weight:400;padding:1px 7px;border-radius:99px;background:var(--pulse-control);color:var(--pulse-muted)}
+      .models-list{display:flex;flex-direction:column;gap:1px;padding:0 2px}
+      .model-row{width:100%;border:0;background:transparent;text-align:left;font:inherit;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:7px;font-size:12px;line-height:1.3;color:var(--pulse-foreground);cursor:pointer;user-select:none;transition:background-color 110ms ease}
+      .model-row:hover{background:var(--pulse-hover)}.model-row[data-queued=true]{background:color-mix(in srgb,var(--pulse-accent) 12%,transparent)}
+      .model-row-main{display:flex;align-items:baseline;gap:6px;min-width:0;overflow:hidden}.model-row-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .model-row[data-active=true] .model-row-name{font-weight:600}.model-row-effort{font-size:11px;color:var(--pulse-muted);white-space:nowrap}
+      .model-row-right{display:flex;align-items:center;gap:5px;flex:none}.model-row-est{font-size:10px;color:var(--pulse-muted);font-variant-numeric:tabular-nums}
+      .model-q-tag{font-size:9px;font-weight:500;padding:1px 6px;border-radius:99px;background:color-mix(in srgb,var(--pulse-accent) 18%,transparent);color:var(--pulse-accent);white-space:nowrap}
+      .model-chev{width:12px;height:12px;color:var(--pulse-muted);flex:none}
+      .model-check{width:13px;height:13px;color:var(--pulse-foreground);flex:none}
+      .queued-chip{color:var(--pulse-accent)!important;background:color-mix(in srgb,var(--pulse-accent) 12%,transparent)!important;border-radius:99px!important;padding:2px 7px!important;font-size:10px!important;gap:4px!important;max-width:150px}.queued-chip:hover{background:color-mix(in srgb,var(--pulse-accent) 20%,transparent)!important}#queued-model-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.queued-x{opacity:.7;font-size:11px;line-height:1}
+      .models-footer{margin-top:6px;padding-top:6px;border-top:1px solid var(--pulse-separator)}
+      .models-usage-btn{width:100%;display:flex;align-items:center;gap:8px;padding:7px 8px;border:0;border-radius:7px;background:transparent;color:var(--pulse-foreground);font:inherit;font-size:12px;text-align:left;cursor:pointer;transition:background-color 120ms ease}
+      .models-usage-btn:hover{background:var(--pulse-hover)}.models-usage-btn .chev{margin-left:auto;color:var(--pulse-muted)}
+      .models-sub{position:fixed;inset:auto;margin:0;z-index:2147483001;padding:12px 14px;border-radius:13px;background:linear-gradient(145deg,var(--pulse-card),var(--pulse-card-end));box-shadow:0 8px 32px var(--pulse-shadow);border:1px solid var(--pulse-border);color:var(--pulse-foreground);font-size:12px}.models-sub::backdrop{background:transparent;pointer-events:none}.models-sub[hidden]{display:none}
+      .models-tier-sub{padding:8px 6px}.models-tier-sub .models-sub-title{margin:0 8px 5px}
+      .models-sub-title{font-size:11px;font-weight:500;color:var(--pulse-muted);margin:0 0 10px}
+      .models-u-group+.models-u-group{margin-top:12px;padding-top:10px;border-top:1px solid var(--pulse-separator)}
+      .models-u-gname{font-size:12px;font-weight:600;margin:0 0 7px;color:var(--pulse-foreground)}
+      .models-u-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0}
+      .models-u-left{display:grid;gap:2px;min-width:0}.models-u-label{font-size:11px;color:var(--pulse-label)}.models-u-reset{font-size:10px;color:var(--pulse-muted);font-variant-numeric:tabular-nums}
+      .models-u-right{display:flex;align-items:center;gap:7px;flex:none;font-size:11px;color:var(--pulse-label);font-variant-numeric:tabular-nums}
+      .models-u-ring{display:inline-block;width:14px;height:14px;border-radius:50%;flex:none;background:conic-gradient(var(--ring-color,var(--pulse-success)) var(--ring-deg,0deg),var(--pulse-track) 0);mask:radial-gradient(circle,transparent 46%,#000 50%)}
     `;root.append(guideStyle);
+    const modelsCard=document.createElement('section');modelsCard.className='card models-card';modelsCard.id='models-card';modelsCard.hidden=true;modelsCard.setAttribute('role','region');modelsCard.dataset.i18nAria='modelsTitle';
+    setMarkup(modelsCard,'<div class="heading"><span data-i18n="modelsTitle">Model</span><span class="models-ro-tag" data-i18n="modelsReadOnly">Next turn</span></div><div class="models-list" id="models-list"></div><div class="models-footer"><button type="button" class="models-usage-btn" id="models-view-usage"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 11.5A6 6 0 1 1 13.5 11.5"/><path d="M8 9l2.6-2.8"/><circle cx="8" cy="9.5" r="1"/></svg><span data-i18n="modelsViewUsage">View Usage</span><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></button></div>');
+    root.append(modelsCard);
+    const modelsSub=document.createElement('section');modelsSub.className='models-sub';modelsSub.id='models-usage-card';modelsSub.hidden=true;modelsSub.setAttribute('role','region');modelsSub.dataset.i18nAria='modelsUsage';
+    setMarkup(modelsSub,'<div class="models-sub-title" data-i18n="modelsUsage">Usage</div><div id="models-usage-body"></div>');
+    root.append(modelsSub);
+    const tierSub=document.createElement('section');tierSub.className='models-sub models-tier-sub';tierSub.id='models-tier-card';tierSub.hidden=true;tierSub.setAttribute('role','region');
+    setMarkup(tierSub,'<div class="models-sub-title" id="models-tier-title"></div><div class="models-list" id="models-tier-body"></div>');
+    root.append(tierSub);
+    $('queued-model-chip').addEventListener('click',()=>{queuedSwitch=null;renderQueuedChip();renderModelsCard();fit();});
+    $('models-view-usage').addEventListener('pointerenter',()=>{clearTimeout(hoverTimer);showUsageSub();});
+    $('models-view-usage').addEventListener('pointerleave',scheduleHideUsageSub);
+    $('models-view-usage').addEventListener('click',()=>{if(usageDashboard){const trigger=watchedModel||root.querySelector('[data-card=context]');hide();usageDashboard.open(data?.usage,trigger,'estimate');}});
+    modelsSub.addEventListener('pointerenter',()=>{clearTimeout(hoverTimer);clearTimeout(usageSubTimer);usageSubTimer=null;});
+    modelsSub.addEventListener('pointerleave',()=>{scheduleHideUsageSub();scheduleHide();});
+    tierSub.addEventListener('pointerenter',()=>{clearTimeout(hoverTimer);clearTimeout(tierSubTimer);tierSubTimer=null;});
+    tierSub.addEventListener('pointerleave',()=>{scheduleHideTierSub();scheduleHide();});
+    if(typeof modelsSub.showPopover==='function')modelsSub.setAttribute('popover','manual');
+    if(typeof tierSub.showPopover==='function')tierSub.setAttribute('popover','manual');
     $('guide-close').addEventListener('click',()=>void dismissGuide());
     $('guide-open').addEventListener('click',()=>{guideOpened=true;show('context');$('card-language-zh').scrollIntoView({block:'nearest'});$('card-language-zh').focus({preventScroll:true});});
     // Escape ancestor stacking/paint contexts; ordinary z-index cannot do this.
@@ -694,11 +907,148 @@ module.exports = function installAgPulseInlineWidget() {
       const updNote=window==='weekly'&&!errNote&&data.quotaUpdatedAt?t('updated',{time:new Date(data.quotaUpdatedAt).toLocaleTimeString(language.language,{hour12:false})}):'';
       text(`${name}-note`,[composer?.kind==='subagent'&&window==='5h'?t('accountQuota'):'',errNote,updNote].filter(Boolean).join(' — '));
     }
-    attribute($('dot'),'class',`dot ${data.connection}`);attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));tick();fit();position();
+    attribute($('dot'),'class',`dot ${data.connection}`);attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));renderQueuedChip();renderModelsCard();tick();fit();position();
+  }
+  function shortReset(at){
+    const end=Date.parse(at);if(!Number.isFinite(end))return '—';
+    const left=Math.max(0,Math.ceil((end-Date.now())/1000));
+    if(left<60)return language.language==='zh-CN'?'<1分钟':'<1m';
+    const d=Math.floor(left/86400),h=Math.floor((left%86400)/3600),m=Math.floor((left%3600)/60);
+    if(language.language==='zh-CN')return d?`${d}天 ${h}小时`:h?`${h}小时 ${m}分`:`${m}分钟`;
+    return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`;
+  }
+  const tierRank=s=>({xhigh:0,'extra high':0,high:1,medium:2,low:3,minimal:4}[String(s||'').toLowerCase()]??9);
+  const prettyTier=s=>/^xhigh$/i.test(String(s||''))?'Extra High':String(s||'');
+  function renderModelsCard(){
+    const list=$('models-list'),usageBody=$('models-usage-body');
+    if(!list||!usageBody)return;
+    const groups=data?.groups||[],estGroups=data?.quotaEstimate?.groups||[];
+    const ctx=findModelSelectorContext(watchedModel);
+    const curOpt=ctx?.selectedModel||null;
+    const rawActive=(curOpt?.label||watchedModel?.getAttribute('data-model-label')||data?.speed?.model||'').trim();
+    const activeClean=rawActive.replace(/\s*\(([^)]+)\)\s*$/,' $1').trim();
+    const activeLow=activeClean.toLowerCase();
+    const estByName=new Map();
+    for(const eg of estGroups)for(const em of eg.models||[])estByName.set(String(em.model||'').toLowerCase(),em);
+    const items=[];
+    tierMap=new Map();
+    const liveOpts=(ctx?.modelOptions||[]).filter(m=>m&&!m.disabled&&m.label);
+    if(liveOpts.length){
+      const byBase=new Map();
+      for(const opt of liveOpts){
+        const m=String(opt.label).match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+        const base=m?m[1].trim():String(opt.label).trim();
+        const tierRaw=m?m[2].trim():'';
+        const key=base.toLowerCase();
+        if(!byBase.has(key))byBase.set(key,{key,name:base,options:[],est:estByName.get(key)||null});
+        byBase.get(key).options.push({...opt,tierLabel:prettyTier(tierRaw||opt.label)});
+      }
+      for(const entry of byBase.values()){
+        entry.options.sort((a,b)=>tierRank(a.tierLabel)-tierRank(b.tierLabel));
+        if(entry.options.length>1)tierMap.set(entry.key,entry);
+        items.push(entry);
+      }
+    }else{
+      const seen=new Set();let orchestratorSeen=false;
+      for(const g of groups){
+        const match=String(g.description||'').match(/Models within this group:\s*([^\n]+)/i);
+        const names=match?match[1].split(',').map(s=>s.trim()).filter(Boolean):[];
+        for(const rawName of names){
+          if(/^Orchestrator\b/i.test(rawName)){if(orchestratorSeen)continue;orchestratorSeen=true;items.push({key:'orchestrator',name:'Orchestrator',options:[],est:null});seen.add('orchestrator');continue;}
+          const key=rawName.toLowerCase();if(seen.has(key))continue;seen.add(key);
+          items.push({key,name:rawName,options:[],est:estByName.get(key)||null});
+        }
+      }
+    }
+    list.replaceChildren();
+    if(!items.length){
+      const emptyEl=document.createElement('div');emptyEl.className='model-row';emptyEl.textContent=t('modelsNone');list.append(emptyEl);
+    }else{
+      for(const item of items){
+        const low=item.name.toLowerCase();
+        const activeOpt=item.options.find(o=>curOpt&&((o.value!=null&&curOpt.value===o.value)||(o.modelId&&curOpt.modelId===o.modelId)))||null;
+        const queuedOpt=item.options.find(o=>queuedSwitch&&((o.value!=null&&queuedSwitch.value===o.value)||(o.modelId&&queuedSwitch.modelId===o.modelId)))||null;
+        const isActive=Boolean(activeOpt||(activeLow&&(activeLow===low||activeLow.startsWith(low+' ')||item.est?.active)));
+        const effort=queuedOpt?queuedOpt.tierLabel:activeOpt?activeOpt.tierLabel:(isActive&&activeLow.startsWith(low+' ')?prettyTier(activeClean.slice(item.name.length).trim()):item.options.length===1?item.options[0].tierLabel:'');
+        const hasTiers=item.options.length>1;
+        const row=document.createElement('button');row.type='button';row.className='model-row';
+        if(isActive)row.dataset.active='true';
+        if(queuedOpt)row.dataset.queued='true';
+        const main=document.createElement('span');main.className='model-row-main';
+        const nameSpan=document.createElement('span');nameSpan.className='model-row-name';nameSpan.textContent=item.name;
+        main.append(nameSpan);
+        if(effort&&effort.toLowerCase()!==low){const effSpan=document.createElement('span');effSpan.className='model-row-effort';effSpan.textContent=effort;main.append(effSpan);}
+        const right=document.createElement('span');right.className='model-row-right';
+        const remTok=item.est?.remaining5hTokens??item.est?.remainingWeeklyTokens??null;
+        if(remTok!==null){
+          const estSpan=document.createElement('span');estSpan.className='model-row-est';estSpan.textContent=remTok===0?'0':'~'+compact(remTok);
+          const tips=[];
+          if(item.est?.remaining5hTokens!=null)tips.push(`5h: ~${compact(item.est.remaining5hTokens)} tok`);
+          if(item.est?.remainingWeeklyTokens!=null)tips.push(`${t('weekShort')}: ~${compact(item.est.remainingWeeklyTokens)} tok`);
+          if(tips.length)row.title=tips.join(' / ');
+          right.append(estSpan);
+        }
+        if(queuedOpt){
+          const qTag=document.createElement('span');qTag.className='model-q-tag';qTag.textContent=t('modelsQueued');right.append(qTag);
+        }else if(isActive){
+          const chk=document.createElementNS('http://www.w3.org/2000/svg','svg');chk.setAttribute('viewBox','0 0 16 16');chk.setAttribute('aria-hidden','true');chk.setAttribute('class','model-check');
+          const p=document.createElementNS('http://www.w3.org/2000/svg','path');p.setAttribute('d','m3.5 8.5 3 3 6-6.5');chk.append(p);right.append(chk);
+        }else if(hasTiers){
+          const chev=document.createElementNS('http://www.w3.org/2000/svg','svg');chev.setAttribute('viewBox','0 0 16 16');chev.setAttribute('aria-hidden','true');chev.setAttribute('class','model-chev');
+          const p=document.createElementNS('http://www.w3.org/2000/svg','path');p.setAttribute('d','m6 4 4 4-4 4');chev.append(p);right.append(chev);
+        }
+        row.append(main,right);
+        if(item.options.length){
+          row.addEventListener('click',()=>{
+            const pick=queuedOpt||(hasTiers?(item.options.find(o=>/medium|high/i.test(o.tierLabel))||item.options[0]):item.options[0]);
+            queueModelSwitch(pick);
+          });
+        }
+        if(hasTiers){
+          row.addEventListener('pointerenter',()=>{clearTimeout(hoverTimer);showTierSub(item.key,row);});
+          row.addEventListener('pointerleave',scheduleHideTierSub);
+        }else{
+          row.addEventListener('pointerenter',()=>{clearTimeout(hoverTimer);hideTierSub();hideUsageSub();});
+        }
+        list.append(row);
+      }
+    }
+    usageBody.replaceChildren();
+    for(const g of groups){
+      const sec=document.createElement('div');sec.className='models-u-group';
+      const title=document.createElement('div');title.className='models-u-gname';title.textContent=g.name||label(g);
+      sec.append(title);
+      for(const [wKey,labelKey]of [['weekly','modelsWeeklyLimit'],['5h','modelsFiveLimit']]){
+        const b=g.windows?.[wKey];if(!b?.available)continue;
+        const row=document.createElement('div');row.className='models-u-row';
+        const left=document.createElement('div');left.className='models-u-left';
+        const lbl=document.createElement('span');lbl.className='models-u-label';lbl.textContent=t(labelKey);
+        left.append(lbl);
+        if(b.resetAt){
+          const rst=document.createElement('span');rst.className='models-u-reset';rst.dataset.resetAt=b.resetAt;
+          rst.textContent=t('modelsResetsIn',{time:shortReset(b.resetAt)});
+          left.append(rst);
+        }
+        const right=document.createElement('div');right.className='models-u-right';
+        const frac=typeof b.remaining==='number'?Math.max(0,Math.min(1,b.remaining)):null;
+        const pctSpan=document.createElement('span');pctSpan.textContent=frac===null?'—':t('modelsLeft',{pct:Math.round(frac*100)});
+        const ring=document.createElement('span');ring.className='models-u-ring';
+        ring.style.setProperty('--ring-deg',`${frac===null?0:Math.round(frac*360)}deg`);
+        ring.style.setProperty('--ring-color',frac!==null&&frac<.05?'var(--pulse-danger)':frac!==null&&frac<.2?'var(--pulse-warning)':'var(--pulse-success)');
+        right.append(pctSpan,ring);
+        row.append(left,right);
+        sec.append(row);
+      }
+      usageBody.append(sec);
+    }
   }
   function tick(){
     if(!root)return;
+    flushQueuedModelSwitch();
     for(const [window,name]of[['5h','five'],['weekly','week']]){const b=group?.windows?.[window];text(`${name}-timer`,timer(b?.resetAt,true));text(`${name}-countdown`,timer(b?.resetAt));if(b?.resetAt&&Date.parse(b.resetAt)<=Date.now()&&Date.now()-lastExpiredRefresh>30000){lastExpiredRefresh=Date.now();refresh(true);}}
+    if(cardName==='models'){
+      for(const el of root.querySelectorAll('#models-usage-body [data-reset-at]'))el.textContent=t('modelsResetsIn',{time:shortReset(el.dataset.resetAt)});
+    }
   }
   function refreshBusy(busy){
     for(const button of root?.querySelectorAll('.refresh')||[]){
@@ -738,14 +1088,15 @@ module.exports = function installAgPulseInlineWidget() {
     })();
     return refreshRequest;
   }
-  const observer=new MutationObserver(records=>{if(records.some(record=>record.target!==node&&!node?.contains(record.target)))scheduleLayout();});observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden','inert','data-cascade-id','data-testid','data-tooltip-id','aria-label','role','contenteditable']});
+  const observer=new MutationObserver(records=>{if(records.some(record=>record.target!==node&&!node?.contains(record.target))){flushQueuedModelSwitch();scheduleLayout();}});observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden','inert','data-cascade-id','data-testid','data-tooltip-id','aria-label','aria-disabled','disabled','role','contenteditable']});
   const onKey=e=>{if(e.key==='Escape')hide();}, onPointer=e=>{if(node&&!e.composedPath().includes(node))hide();};
   document.addEventListener('keydown',onKey);document.addEventListener('pointerdown',onPointer);
   window.addEventListener('resize',scheduleLayout);document.addEventListener('scroll',scheduleLayout,true);
   densityMedia.addEventListener('change',stopDensityMotion);
-  const timerId=setInterval(()=>{mount();fit();tick();position();if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:2200))refresh();},1000);
+  const timerId=setInterval(()=>{mount();flushQueuedModelSwitch();fit();tick();position();if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:2200))refresh();},1000);
   window.__agPulseDispose=()=>{
     disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;
+    bindModelTrigger(null);clearTimeout(usageSubTimer);usageSubTimer=null;clearTimeout(tierSubTimer);tierSubTimer=null;queuedSwitch=null;
     clearInterval(timerId);clearTimeout(hoverTimer);clearTimeout(openTimer);if(layoutFrame!==null)cancelAnimationFrame(layoutFrame);observer.disconnect();resizeObserver?.disconnect();themeController?.dispose();preferences.dispose();hide();usageDashboard?.dispose();node?.remove();
     document.removeEventListener('keydown',onKey);document.removeEventListener('pointerdown',onPointer);
     document.removeEventListener('scroll',scheduleLayout,true);window.removeEventListener('resize',scheduleLayout);
