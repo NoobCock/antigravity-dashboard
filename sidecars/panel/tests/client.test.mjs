@@ -6,7 +6,7 @@ import {AntigravityClient,serverFromDiscovery} from '../client.mjs';
 async function fixture(t){
  const state={scans:0,now:100000,status:404,body:'{}',requests:0};
  const server=createServer((req,res)=>{state.requests++;req.resume();res.writeHead(state.status,{'Content-Type':'application/json'});res.end(state.body);});
- await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections?.();return new Promise(r=>server.close(r));});
  state.port=server.address().port;state.pid=42;
  const client=new AntigravityClient({now:()=>state.now,paths:()=>({log:'fixture'}),readLog:async()=>`listening on random port at ${state.port} for HTTP\n`,
   processes:async()=>{state.scans++;return [{ProcessId:state.pid,CommandLine:'language_server --standalone --csrf_token=fixture',Ports:[state.port]}];}});
@@ -54,9 +54,10 @@ test('authorization failures have a cooldown, then rediscover without disabling 
 test('a refused old port rediscovers a restarted backend once, without toggling the plugin',async t=>{
  const {client,state,server}=await fixture(t);state.status=200;
  await client.call('GetUserStatus');assert.equal(state.scans,1);
+ server.closeAllConnections?.();
  await new Promise(r=>server.close(r));
  const replacement=createServer((req,res)=>{req.resume();res.end('{}');});
- await new Promise(r=>replacement.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>replacement.close(r)));
+ await new Promise(r=>replacement.listen(0,'127.0.0.1',r));t.after(()=>{replacement.closeAllConnections?.();return new Promise(r=>replacement.close(r));});
  state.port=replacement.address().port;state.pid=43;state.now+=3000;
  assert.deepEqual(await client.call('GetUserStatus'),{});
  assert.equal(client.server.pid,43);assert.equal(state.scans,2);
@@ -74,7 +75,7 @@ test('sidecar env credentials authenticate 2.34+ standalone processes without CL
  assert.throws(()=>serverFromDiscovery(log,proc,{ANTIGRAVITY_LS_ADDRESS:'http://example.com:51291',ANTIGRAVITY_CSRF_TOKEN:'sidecar-tok'}),/本地检测凭据/);
  // Falls back to verified loopback HTTP env port when log is unavailable
  const server=createServer((req,res)=>{assert.equal(req.headers['x-codeium-csrf-token'],'env-tok');req.resume();res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');});
- await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections?.();return new Promise(r=>server.close(r));});
  const port=server.address().port;
  const client=new AntigravityClient({
   paths:()=>({logCandidates:['missing-log']}),

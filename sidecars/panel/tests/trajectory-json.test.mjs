@@ -67,7 +67,7 @@ test('a real HTTP step page above the old 32 MiB cap restores all metrics withou
   for(let i=0;i<640;i++){wireBytes+=chunk.length;if(!res.write(chunk))await once(res,'drain');}
   res.end(tail);wireBytes+=Buffer.byteLength(tail);
  });
- await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections?.();return new Promise(r=>server.close(r));});
  const port=server.address().port,client=new AntigravityClient({paths:()=>({log:'fixture'}),readLog:async()=>`listening on random port at ${port} for HTTP\n`,
  processes:async()=>{scans++;return [{ProcessId:42,CommandLine:'language_server --standalone --csrf_token=fixture',Ports:[port]}];}});
  const raw=await client.trajectory(id);assert.ok(wireBytes>32*1024*1024);assert.ok(Buffer.byteLength(JSON.stringify(raw))<4096);assert.ok(!methods.includes('GetCascadeTrajectory'));
