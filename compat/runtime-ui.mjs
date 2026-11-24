@@ -30,10 +30,10 @@ function jsonGet(port, path) {
   return new Promise((resolve, reject) => {
     const req = request({ hostname: '127.0.0.1', port, path, method: 'GET' }, res => {
       let body = ''; res.setEncoding('utf8');
-      res.on('data', chunk => { body += chunk; if (body.length > 1048576) req.destroy(new Error('Discovery response too large')); });
+      res.on('data', chunk => { body += chunk; if (body.length > 1048576) { reject(new Error('Discovery response too large')); req.destroy(); } });
       res.on('end', () => { try { if (res.statusCode !== 200) throw new Error('Renderer discovery unavailable'); resolve(JSON.parse(body)); } catch (error) { reject(error); } });
     });
-    req.on('error', reject); req.setTimeout(2000, () => req.destroy(new Error('Renderer discovery timeout'))); req.end();
+    req.on('error', reject); req.setTimeout(2000, () => { reject(new Error('Renderer discovery timeout')); req.destroy(); }); req.end();
   });
 }
 
