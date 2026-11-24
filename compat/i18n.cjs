@@ -24,8 +24,7 @@ module.exports = function createDashboardI18n(initialLanguage) {
       cacheBasis:'',cacheMissing:'{n} req missing cache.',cacheUnavailable:'No cache stats.',
       cacheCoverage:'{measured}/{total} req',language:'Language',switchLanguage:'Switch to Chinese',languageSaveFailed:'Save failed.',reconnecting:'Waiting to reconnect',panelUnavailable:'Panel unavailable',invalidData:'Invalid data',
       estApiQuota:'API quota',estRemaining:'Est. left',estWaiting:'Pending',estOpen:'Quota estimate',estPrior:'Prior',
-      modelsTitle:'Model',modelsReadOnly:'Next turn',modelsActive:'Current',modelsQueued:'Next',modelsCancelQueue:'Click to cancel queued switch',modelsQueuedTip:'Switches to {model} after this turn — click to cancel',modelsNone:'No models available.',
-      modelsViewUsage:'View Usage',modelsUsage:'Usage',modelsWeeklyLimit:'Weekly limit',modelsFiveLimit:'5h limit',modelsResetsIn:'Resets in {time}',modelsLeft:'{pct}% left',
+      modelsQueuedTip:'Switches to {model} after this turn — click to cancel',
     },
     'zh-CN':{
       panelSpeed:'速度',panelCache:'缓存',panelContext:'上下文',panelDetails:'统计详情',panelUsed:'已用',panelSharedQuota:'共享额度',
@@ -47,8 +46,7 @@ module.exports = function createDashboardI18n(initialLanguage) {
       cacheRate:'缓存命中',cacheRead:'缓存读取',cacheInput:'总输入',cacheMiss:'未缓存',cacheWrite:'缓存写入',cacheOutput:'输出',cacheBasis:'',cacheMissing:'{n} 次缺少缓存统计。',cacheUnavailable:'暂无缓存统计。',cacheCoverage:'{measured}/{total} 次',
       language:'语言',switchLanguage:'Switch to English',languageSaveFailed:'保存失败。',reconnecting:'等待控件重新连接',panelUnavailable:'面板暂不可用',invalidData:'数据格式无效',
       estApiQuota:'等效额度',estRemaining:'预计剩余',estWaiting:'待校准',estOpen:'剩余额度测算',estPrior:'上周期',
-      modelsTitle:'模型',modelsReadOnly:'本轮结束后切换',modelsActive:'当前',modelsQueued:'待切换',modelsCancelQueue:'点击取消预约切换',modelsQueuedTip:'本轮结束后切换为 {model}，点击取消',modelsNone:'暂无模型信息。',
-      modelsViewUsage:'查看额度',modelsUsage:'额度',modelsWeeklyLimit:'周额度',modelsFiveLimit:'5h 额度',modelsResetsIn:'{time} 后重置',modelsLeft:'剩余 {pct}%',
+      modelsQueuedTip:'本轮结束后切换为 {model}，点击取消',
     },
   };
   let language=initialLanguage==='zh-CN'?'zh-CN':'en';
