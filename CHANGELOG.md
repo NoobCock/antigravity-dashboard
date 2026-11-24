@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0 — 2026-11-24
+
+- Add automatic GitHub Releases (`/releases/latest`) update checking and self-updating in `sidecars/panel/updater.mjs`, wired to `RuntimeUi`, `/api/update`, and a compact footer control in the Context card (`Check` / `Update` / `Auto`). Verifies HTTPS allowlisted download/redirect hosts, `.sha256` digest, CRC32, ZIP path safety, and stages runtime files atomically while preserving user data and protecting `.git` checkouts; restarts the sidecar cleanly for live hot-reload.
+- Open Antigravity's native Base-UI model menu while the agent is running (`openProp: true`, `Model will be changed after this turn`) with full `Thinking effort` and `View Usage` submenu support, queueing model selections locally and applying them automatically when the turn unlocks.
+- Immediately refresh context occupancy after `/compact` checkpoints, align weekly quota token estimates with actual reset windows (`~remaining / ~total`), retain elevated Windows `language_server.exe` backends via live port + sidecar credentials, and harden `manage.py install` with atomic staging.
+
 ## 0.8.5 — 2026-10-13
 
 - Replace whole-trajectory polling with independent offset reads for steps and generator metadata (`includeMessages: false`), using summaries, cached immutable prefixes and revalidated mutable tails. Incrementally validate/project returned JSON without retaining prompts, attachments or tool output. Preserve tool-only classification rather than substituting reduced verbosity that loses tool-call markers.

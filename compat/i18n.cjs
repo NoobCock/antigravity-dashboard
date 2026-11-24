@@ -25,6 +25,7 @@ module.exports = function createDashboardI18n(initialLanguage) {
       cacheCoverage:'{measured}/{total} req',language:'Language',switchLanguage:'Switch to Chinese',languageSaveFailed:'Save failed.',reconnecting:'Waiting to reconnect',panelUnavailable:'Panel unavailable',invalidData:'Invalid data',
       estApiQuota:'API quota',estRemaining:'Est. left',estWaiting:'Pending',estOpen:'Quota estimate',estPrior:'Prior',
       modelsQueuedTip:'Switches to {model} after this turn — click to cancel',
+      updateCheck:'Check',updateChecking:'Checking…',updateNow:'Update',updateUpdating:'Updating…',updateAuto:'Auto',updateLatest:'Up to date',updateAvailable:'v{version} available',updateApplied:'Updated to v{version}',updateFailed:'Check failed',updateDev:'Dev',
     },
     'zh-CN':{
       panelSpeed:'速度',panelCache:'缓存',panelContext:'上下文',panelDetails:'统计详情',panelUsed:'已用',panelSharedQuota:'共享额度',
@@ -47,6 +48,7 @@ module.exports = function createDashboardI18n(initialLanguage) {
       language:'语言',switchLanguage:'Switch to English',languageSaveFailed:'保存失败。',reconnecting:'等待控件重新连接',panelUnavailable:'面板暂不可用',invalidData:'数据格式无效',
       estApiQuota:'等效额度',estRemaining:'预计剩余',estWaiting:'待校准',estOpen:'剩余额度测算',estPrior:'上周期',
       modelsQueuedTip:'本轮结束后切换为 {model}，点击取消',
+      updateCheck:'检查',updateChecking:'检查中…',updateNow:'更新',updateUpdating:'更新中…',updateAuto:'自动',updateLatest:'已是最新',updateAvailable:'有新版 v{version}',updateApplied:'已更新至 v{version}',updateFailed:'检查失败',updateDev:'开发版',
     },
   };
   let language=initialLanguage==='zh-CN'?'zh-CN':'en';

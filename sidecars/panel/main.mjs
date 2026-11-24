@@ -8,6 +8,7 @@ import { MetricsStore } from './store.mjs';
 import { DesktopUsage } from './usage.mjs';
 import { QuotaEstimator } from './quota-estimate.mjs';
 import { PricingStore } from './pricing.mjs';
+import { DashboardUpdater } from './updater.mjs';
 import { loadSidecarSdk } from './sdk.mjs';
 import { RuntimeUi, makeRendererSource } from '../../compat/runtime-ui.mjs';
 import { platformPaths } from '../../compat/platform.mjs';
@@ -23,6 +24,10 @@ const store = new MetricsStore();
 const usage=new DesktopUsage(store);
 const quotaEstimator=new QuotaEstimator();
 const pricingStore=new PricingStore();
+let onUpdateShutdown=null;
+const updater=new DashboardUpdater({
+  onUpdated:()=>{if(typeof onUpdateShutdown==='function'){const t=setTimeout(()=>{void onUpdateShutdown();},1500);t.unref?.();}},
+});
 store.onTrajectory=(scope,id,raw)=>usage.ingest(scope,id,raw);
 const preferences=new PreferencesStore();
 const ownership=process.env.ANTIGRAVITY_SIDECAR_WEB_PORT?new SidecarOwner(platformPaths().data):null;
@@ -40,6 +45,7 @@ const metrics = async input => {
   return {
     ...base,quotaEstimate,
     usage:usageSnapshot?{...usageSnapshot,quotaEstimate}:null,
+    update:updater.snapshot(),
     preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health,
   };
 };
@@ -64,6 +70,7 @@ const integration = new RuntimeUi({
   snapshot: input => metrics(input),
   preferences,
   pricing: pricingStore,
+  updater,
   owner:ownership?.token,owns:()=>ownership?ownership.isOwner():true,
   source: makeRendererSource(readFileSync(join(HERE,'..','..','compat','i18n.cjs'),'utf8'),readFileSync(join(HERE,'..','..','compat','inline-widget.cjs'),'utf8'),readFileSync(join(HERE,'..','..','compat','theme.cjs'),'utf8'),ownership?.token,ownership?.startedAt,usageSource()),
   dataDir: platformPaths().data,
@@ -85,14 +92,23 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.api('/api/preferences',async data=>{try{return await preferences.set(data);}catch{return new Response(JSON.stringify({error:'Language preference could not be saved'}),{status:400,contentType:'application/json'});}},'POST');
   app.api('/api/pricing',()=>pricingStore.snapshot(),'GET');
   app.api('/api/pricing',async data=>{try{return await pricingStore.handleAction(data);}catch(e){return new Response(JSON.stringify({ok:false,error:e?.message||'Pricing update failed'}),{status:400,contentType:'application/json'});}},'POST');
+  app.api('/api/update',async()=>{await updater.load();return updater.snapshot();},'GET');
+  app.api('/api/update',async data=>{try{return await updater.handleAction(data);}catch(e){return new Response(JSON.stringify({ok:false,error:e?.message||'Update action failed'}),{status:400,contentType:'application/json'});}},'POST');
   app.run();
   integration.start();
   void pricingStore.refreshLive().catch(()=>{});
   void store.snapshot().then(()=>usage.sync()).catch(()=>{});
+  let updateInitTimer=null,updateLoopTimer=null;
   const shutdown=async()=>{
+    clearTimeout(updateInitTimer);clearInterval(updateLoopTimer);
     const exitTimer=setTimeout(()=>process.exit(0),2000);exitTimer.unref();
     await integration.stop();ownership.stop();process.exit(0);
   };
+  onUpdateShutdown=shutdown;
+  updateInitTimer=setTimeout(()=>{void updater.check({autoApply:true}).catch(()=>{});},10000);
+  updateInitTimer.unref?.();
+  updateLoopTimer=setInterval(()=>{void updater.check({autoApply:true}).catch(()=>{});},6*3600*1000);
+  updateLoopTimer.unref?.();
   ownership.watch(shutdown);
   for (const signal of ['SIGTERM','SIGINT']) process.once(signal, () => {
     void shutdown();
@@ -128,6 +144,20 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
         try {for await(const chunk of req){body+=chunk;if(body.length>4096)throw new Error('Pricing payload too large');}
           res.end(JSON.stringify(await pricingStore.handleAction(JSON.parse(body))));
         }catch(e){res.writeHead(400);res.end(JSON.stringify({ok:false,error:e?.message||'Pricing update failed'}));}
+        return;
+      }
+      res.writeHead(405);res.end();return;
+    }
+    if (url.pathname === '/api/update') {
+      const sameOrigin=req.headers.origin===`http://${host}`;
+      if(req.headers.origin&&!sameOrigin){res.writeHead(403);res.end();return;}
+      res.setHeader('Cache-Control','no-store');res.setHeader('Content-Type','application/json; charset=utf-8');
+      if(req.method==='GET'){await updater.load();res.end(JSON.stringify(updater.snapshot()));return;}
+      if(req.method==='POST'&&sameOrigin&&String(req.headers['content-type']).startsWith('application/json')){
+        let body='';
+        try {for await(const chunk of req){body+=chunk;if(body.length>1024)throw new Error('Update payload too large');}
+          res.end(JSON.stringify(await updater.handleAction(JSON.parse(body))));
+        }catch(e){res.writeHead(400);res.end(JSON.stringify({ok:false,error:e?.message||'Update action failed'}));}
         return;
       }
       res.writeHead(405);res.end();return;

@@ -837,6 +837,9 @@ module.exports = function installAgPulseInlineWidget() {
     setMarkup(languageRow,'<span>Language / 语言</span><div class="language-options" role="group" aria-label="Language / 语言"><button type="button" class="language-button" id="card-language-en" data-language-choice="en">English</button><button type="button" class="language-button" id="card-language-zh" data-language-choice="zh-CN">简体中文</button></div>');
     $('context-card').append(languageRow);
     const saveNote=document.createElement('p');saveNote.className='footnote';saveNote.id='language-save-note';languageRow.after(saveNote);
+    const updateRow=document.createElement('div');updateRow.className='card-update';updateRow.id='update-row';updateRow.hidden=true;
+    setMarkup(updateRow,'<span class="update-info" id="update-info"></span><div class="update-actions"><button type="button" class="update-btn" id="update-action"></button><button type="button" class="update-btn" id="update-auto" aria-pressed="true"></button></div>');
+    saveNote.after(updateRow);
     const guide=document.createElement('section');guide.className='language-guide';guide.id='language-guide';guide.hidden=true;guide.setAttribute('role','region');guide.setAttribute('aria-label','Language / 语言');
     setMarkup(guide,'<div class="guide-heading"><strong>Language <span>/ 语言</span></strong><button type="button" id="guide-close" aria-label="Dismiss language tip / 关闭语言提示" title="Dismiss / 关闭">×</button></div><button type="button" id="guide-open"><span><span>Switch in context details</span><span lang="zh-CN">在上下文详情中切换语言</span></span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9M8 4l4 4-4 4"/></svg></button><p class="footnote" id="guide-save-note"></p>');
     root.append(guide);
@@ -860,8 +863,30 @@ module.exports = function installAgPulseInlineWidget() {
       #guide-open>span{display:grid;gap:1px}#guide-open span[lang]{font-size:10px;color:var(--pulse-muted)}#guide-open svg{width:14px;height:14px;flex:none}
       #guide-save-note:empty,#language-save-note:empty{display:none}#guide-save-note,#language-save-note{color:var(--pulse-warning)}
       .queued-chip{color:var(--pulse-accent)!important;background:color-mix(in srgb,var(--pulse-accent) 12%,transparent)!important;border-radius:99px!important;padding:2px 7px!important;font-size:10px!important;gap:4px!important;max-width:150px}.queued-chip:hover{background:color-mix(in srgb,var(--pulse-accent) 20%,transparent)!important}#queued-model-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.queued-x{opacity:.7;font-size:11px;line-height:1}
+      .card-update{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--pulse-separator);font-size:10px;color:var(--pulse-muted)}.card-update[hidden]{display:none}
+      .update-info{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}.update-info[data-state=available]{color:var(--pulse-accent);font-weight:500}.update-info[data-state=updated]{color:var(--pulse-success)}.update-info[data-state=error]{color:var(--pulse-warning)}
+      .update-actions{display:flex;align-items:center;gap:4px;flex:none}
+      .update-btn{border:0;background:var(--pulse-control);color:var(--pulse-muted);border-radius:4px;font-size:10px;padding:3px 6px;line-height:14px;cursor:pointer;transition:background-color 140ms ease,color 140ms ease}.update-btn:hover:not(:disabled){background:var(--pulse-hover);color:var(--pulse-foreground)}.update-btn:disabled{opacity:.6;cursor:wait}.update-btn[data-primary=true]{background:color-mix(in srgb,var(--pulse-accent) 16%,transparent);color:var(--pulse-accent);font-weight:500}.update-btn[aria-pressed=true]{color:var(--pulse-foreground);background:var(--pulse-hover)}
     `;root.append(guideStyle);
     $('queued-model-chip').addEventListener('click',()=>{queuedSwitch=null;renderQueuedChip();fit();});
+    const runUpdateAction=async payload=>{
+      if(!host()?.runUpdate)return;
+      try{
+        const next=await host().runUpdate(payload);
+        if(next&&typeof next==='object'&&data){data.update=next;renderUpdateRow();}
+      }catch{}
+    };
+    $('update-action').addEventListener('click',()=>{
+      const u=data?.update;if(!u||u.status==='checking'||u.status==='updating')return;
+      const action=u.updateAvailable&&u.hasAssets&&!u.devCheckout?'apply':'check';
+      if(data.update)data.update={...u,status:action==='apply'?'updating':'checking'};
+      renderUpdateRow();
+      void runUpdateAction({action});
+    });
+    $('update-auto').addEventListener('click',()=>{
+      const u=data?.update;if(!u)return;
+      void runUpdateAction({action:'set-auto',autoUpdate:!u.autoUpdate});
+    });
     $('guide-close').addEventListener('click',()=>void dismissGuide());
     $('guide-open').addEventListener('click',()=>{guideOpened=true;show('context');$('card-language-zh').scrollIntoView({block:'nearest'});$('card-language-zh').focus({preventScroll:true});});
     // Escape ancestor stacking/paint contexts; ordinary z-index cannot do this.
@@ -983,7 +1008,35 @@ module.exports = function installAgPulseInlineWidget() {
       const updNote=window==='weekly'&&!errNote&&data.quotaUpdatedAt?t('updated',{time:new Date(data.quotaUpdatedAt).toLocaleTimeString(language.language,{hour12:false})}):'';
       text(`${name}-note`,[composer?.kind==='subagent'&&window==='5h'?t('accountQuota'):'',errNote,updNote].filter(Boolean).join(' — '));
     }
-    attribute($('dot'),'class',`dot ${data.connection}`);attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));renderQueuedChip();tick();fit();position();
+    attribute($('dot'),'class',`dot ${data.connection}`);attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));renderQueuedChip();renderUpdateRow();tick();fit();position();
+  }
+  function renderUpdateRow(){
+    const row=$('update-row');if(!row)return;
+    const u=data?.update;
+    const visible=Boolean(u&&host()?.runUpdate);
+    hidden(row,!visible);
+    if(!visible)return;
+    const info=$('update-info'),actionBtn=$('update-action'),autoBtn=$('update-auto');
+    const ver=`v${u.currentVersion||'0.0.0'}`;
+    let statusText='';
+    if(u.status==='updating')statusText=t('updateUpdating');
+    else if(u.status==='checking')statusText=t('updateChecking');
+    else if(u.status==='updated')statusText=t('updateApplied',{version:u.lastUpdatedVersion||u.latestVersion||u.currentVersion});
+    else if(u.updateAvailable&&u.latestVersion)statusText=t('updateAvailable',{version:u.latestVersion});
+    else if(u.status==='error')statusText=t('updateFailed');
+    else if(u.status==='up-to-date')statusText=t('updateLatest');
+    else if(u.devCheckout)statusText=t('updateDev');
+    info.textContent=statusText?`${ver} (${statusText})`:ver;
+    info.dataset.state=u.status||'idle';
+    info.title=u.error||u.releaseUrl||'';
+    const busy=u.status==='checking'||u.status==='updating';
+    const canApply=Boolean(u.updateAvailable&&u.hasAssets&&!u.devCheckout);
+    actionBtn.disabled=busy;
+    actionBtn.dataset.primary=String(canApply&&!busy);
+    actionBtn.textContent=u.status==='updating'?t('updateUpdating'):u.status==='checking'?t('updateChecking'):canApply?t('updateNow'):t('updateCheck');
+    autoBtn.textContent=t('updateAuto');
+    autoBtn.setAttribute('aria-pressed',String(Boolean(u.autoUpdate)));
+    hidden(autoBtn,Boolean(u.devCheckout));
   }
   function tick(){
     if(!root)return;

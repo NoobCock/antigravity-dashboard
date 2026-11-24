@@ -112,6 +112,8 @@ function rendererBridge(binding) {
     setPreferences: input => call('preferences', input),
     getPricing: () => call('pricing', { action: 'get' }),
     updatePricing: input => call('pricing', input),
+    getUpdate: () => call('update', { action: 'get' }),
+    runUpdate: input => call('update', input),
     report: input => { void call('diagnostic', input); },
   };
   window.__agPulseRuntimeBridge = {
@@ -142,13 +144,14 @@ export function makeRendererSource(i18n, widget, theme = '', owner = null, gener
 
 export class RuntimeUi {
   constructor({ snapshot, source, profile = platformPaths().profile,
-    dataDir, preferences, pricing = null, owner=null, owns=async()=>true, enabled = async () => true, discover = discoverTargets, targetOrigin = target => new URL(target.url).origin, connect = (url, options) => new CdpConnection(url, options), interval = 3000 } = {}) {
+    dataDir, preferences, pricing = null, updater = null, owner=null, owns=async()=>true, enabled = async () => true, discover = discoverTargets, targetOrigin = target => new URL(target.url).origin, connect = (url, options) => new CdpConnection(url, options), interval = 3000 } = {}) {
     this.snapshot = snapshot; this.source = source; this.profile = profile; this.dataDir = dataDir; this.enabled = enabled;
     this.discover = discover; this.connect = connect; this.interval = interval; this.sessions = new Map(); this.running = false;
     this.targetOrigin=targetOrigin;
     this.health = { state: 'waiting', mode: 'runtime', message: 'Waiting for the app renderer', windows: 0 };
     this.preferences=preferences;
     this.pricing=pricing;
+    this.updater=updater;
     this.owner=owner;this.owns=owns;
     this.binding=owner?BINDING+'_'+owner.replaceAll('-',''):BINDING;
   }
@@ -200,6 +203,15 @@ export class RuntimeUi {
         }
         result = await this.pricing.handleAction(value);
       }
+      else if (input.type === 'update' && this.updater) {
+        const value = input.input;
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+          || !['get', 'check', 'apply', 'set-auto'].includes(value.action || 'get')
+          || Object.keys(value).some(key => !['action', 'autoUpdate'].includes(key))) {
+          throw new Error('Invalid update request');
+        }
+        result = await this.updater.handleAction(value);
+      }
       else if (input.type === 'diagnostic' && ['boot', 'mounted', 'mount-error'].includes(input.input?.stage)) {
         if (input.input.stage === 'mounted' && input.input.editorFound && input.input.composerFound) connection.mounted = true;
       } else return;
@@ -207,7 +219,7 @@ export class RuntimeUi {
       if(this.stopping||!await this.owns())return;
       await connection.command('Runtime.evaluate', { expression: this.rendererGuard('window.__agPulseRuntimeBridge?.resolve(' + input.id + ',' + JSON.stringify(result) + ')'), contextId: p.executionContextId });
     } catch {
-      const failure=input.type==='preferences'?{error:'Language preference could not be saved or read'}:input.type==='pricing'?{ok:false,error:'Pricing could not be updated'}:offline('等待 Antigrative Dashboard 重新连接');
+      const failure=input.type==='preferences'?{error:'Language preference could not be saved or read'}:input.type==='pricing'?{ok:false,error:'Pricing could not be updated'}:input.type==='update'?{ok:false,error:'Update check failed'}:offline('等待 Antigrative Dashboard 重新连接');
       if(this.stopping||!await this.owns())return;
       try { await connection.command('Runtime.evaluate', { expression: this.rendererGuard('window.__agPulseRuntimeBridge?.resolve(' + input.id + ',' + JSON.stringify(failure) + ')'), contextId: p.executionContextId }); } catch { /* The next poll reconnects. */ }
     } finally { connection.inflight--; }
