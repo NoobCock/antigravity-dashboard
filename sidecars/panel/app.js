@@ -164,9 +164,28 @@ function render() {
   const timestamp = snapshot.quotaUpdatedAt ? new Date(snapshot.quotaUpdatedAt).toLocaleTimeString(language.language,{hour12:false}) : null;
   $('health-note').textContent = language.errorMessage(snapshot.error||snapshot.sessionError) || (timestamp ? t('health',{time:timestamp}) : t('firstUpdate'));
   $('health-note').classList.toggle('warning', snapshot.connection !== 'live' || !!snapshot.sessionError);
-  const integration = snapshot.integration;
-  $('integration-note').textContent = integration && !['mounted','disabled'].includes(integration.state)
-    ? (language.language === 'zh-CN' ? '内嵌栏正在自动重连；此面板仍可查看统计。' : 'Inline widget is reconnecting automatically; statistics remain available in this panel.') : '';
+  const integration = snapshot.integration, ka = snapshot.keepAlive;
+  let integrationMsg = '';
+  if (integration && !['mounted', 'disabled'].includes(integration.state)) {
+    if (ka?.status === 'repaired-restart-needed') {
+      integrationMsg = language.language === 'zh-CN'
+        ? '检测到 Antigravity 已更新，已自动保活修复内嵌状态条；重启 Antigravity 后即可恢复。'
+        : 'Antigravity updated — inline status bar auto-repaired; restart Antigravity to activate.';
+    } else if (ka?.status === 'staged-pending-exit') {
+      integrationMsg = language.language === 'zh-CN'
+        ? '检测到 Antigravity 已更新，已就绪自动保活修复；退出并重开 Antigravity 时将自动生效。'
+        : 'Antigravity updated — auto-repair is staged and will apply automatically when Antigravity exits.';
+    } else if (ka?.status === 'busy-retrying') {
+      integrationMsg = language.language === 'zh-CN'
+        ? '检测到 Antigravity 已更新，正在自动重试修复内嵌状态条…'
+        : 'Antigravity updated; retrying automatic inline adapter repair…';
+    } else {
+      integrationMsg = language.language === 'zh-CN'
+        ? '内嵌栏正在自动重连；此面板仍可查看统计。'
+        : 'Inline widget is reconnecting automatically; statistics remain available in this panel.';
+    }
+  }
+  $('integration-note').textContent = integrationMsg;
   updateCountdowns();
 }
 

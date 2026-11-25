@@ -11,6 +11,7 @@ import { PricingStore } from './pricing.mjs';
 import { DashboardUpdater } from './updater.mjs';
 import { loadSidecarSdk } from './sdk.mjs';
 import { RuntimeUi, makeRendererSource } from '../../compat/runtime-ui.mjs';
+import { AsarKeepAlive } from '../../compat/asar-keepalive.mjs';
 import { platformPaths } from '../../compat/platform.mjs';
 import { PreferencesStore } from '../../compat/preferences.mjs';
 import { SidecarOwner } from '../../compat/sidecar-owner.mjs';
@@ -46,6 +47,7 @@ const metrics = async input => {
     ...base,quotaEstimate,
     usage:usageSnapshot?{...usageSnapshot,quotaEstimate}:null,
     update:updater.snapshot(),
+    keepAlive:keepAlive.snapshot(),
     preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health,
   };
 };
@@ -76,6 +78,10 @@ const integration = new RuntimeUi({
   dataDir: platformPaths().data,
   enabled: () => { const s = runtimeSettings(); return s.enabled !== false && s.inline !== false && s.mode !== 'legacy'; },
 });
+const keepAlive = new AsarKeepAlive({
+  owns: () => ownership ? ownership.isOwner() : true,
+  enabled: () => { const s = runtimeSettings(); return s.enabled !== false && s.inline !== false && s.mode !== 'legacy'; },
+});
 
 if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   const { SidecarApp, Response } = await loadSidecarSdk();
@@ -87,7 +93,7 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.page('/theme.js',themeModule);
   app.api('/theme.css',()=>new Response(themeCss(),{contentType:'text/css'}),'GET');
   app.api('/api/metrics', data => metrics({ conversationId: data.conversationId || null, force: data.force === true || data.force === '1' }), 'GET');
-  app.api('/api/integration', () => integration.health, 'GET');
+  app.api('/api/integration', () => ({ ...integration.health, keepAlive: keepAlive.snapshot() }), 'GET');
   app.api('/api/preferences',()=>preferences.snapshot(),'GET');
   app.api('/api/preferences',async data=>{try{return await preferences.set(data);}catch{return new Response(JSON.stringify({error:'Language preference could not be saved'}),{status:400,contentType:'application/json'});}},'POST');
   app.api('/api/pricing',()=>pricingStore.snapshot(),'GET');
@@ -96,11 +102,13 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.api('/api/update',async data=>{try{return await updater.handleAction(data);}catch(e){return new Response(JSON.stringify({ok:false,error:e?.message||'Update action failed'}),{status:400,contentType:'application/json'});}},'POST');
   app.run();
   integration.start();
+  keepAlive.start();
   void pricingStore.refreshLive().catch(()=>{});
   void store.snapshot().then(()=>usage.sync()).catch(()=>{});
   let updateInitTimer=null,updateLoopTimer=null;
   const shutdown=async()=>{
     clearTimeout(updateInitTimer);clearInterval(updateLoopTimer);
+    keepAlive.stop();
     const exitTimer=setTimeout(()=>process.exit(0),2000);exitTimer.unref();
     await integration.stop();ownership.stop();process.exit(0);
   };
@@ -171,7 +179,7 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
       catch { res.writeHead(500); res.end('{"error":"数据暂时不可用"}'); }
       return;
     }
-    if (url.pathname === '/api/integration') { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(integration.health)); return; }
+    if (url.pathname === '/api/integration') { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ ...integration.health, keepAlive: keepAlive.snapshot() })); return; }
     if (url.pathname === '/preload.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end('// Standalone preview: no host bridge.'); return; }
     if(url.pathname==='/i18n.js'){res.writeHead(200,{'Content-Type':'text/javascript; charset=utf-8'});res.end(i18nModule());return;}
     if(url.pathname==='/theme.js'){res.writeHead(200,{'Content-Type':'text/javascript; charset=utf-8'});res.end(themeModule());return;}

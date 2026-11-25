@@ -166,6 +166,12 @@ def install(panel_only=False, legacy_loader=False):
 
 def uninstall():
     own_plugin()
+    # Cancel any staged keep-alive repair before restoring the application archive.
+    staged = HOME / '.gemini' / 'antigravity' / 'sidecar_data' / 'antigravity-pulse' / 'panel' / 'data' / 'pending-app.asar'
+    try:
+        staged.unlink()
+    except FileNotFoundError:
+        pass
     # Restore before deleting the runtime. An unknown archive is never overwritten.
     if APP.exists():
         module = adapter()

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.2 — 2026-11-25
+
+- Add pure-Node self-healing ASAR keep-alive (`compat/asar-keepalive.mjs`) in the panel sidecar so Antigravity auto-updates no longer require re-running the install script manually to restore inline session stats. Uses `original-fs` under `ELECTRON_RUN_AS_NODE`, preserves full `AntigravityPulseBackups` parity with `patch-loader.py --restore` / `manage.py uninstall`, and falls back to a bounded detached exit-waiter when `Antigravity.exe` holds `app.asar` locked (`EBUSY`/`EPERM`/`EACCES`).
+
 ## 0.9.1 — 2026-11-24
 
 - Fix long conversations stalling on stale saved history after an unexpected Antigravity shutdown/restart by pruning single-attempt `retryInfos` (keeping only output fields when multiple retry attempts exist) and redundant step timestamps in `sidecars/panel/trajectory-json.mjs`, and aligning `TrajectoryJson`'s per-page internal retained estimator (`16 MiB`) with `TrajectoryReader`'s `8 MiB` serialized JSON budget.

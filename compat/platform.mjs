@@ -2,6 +2,10 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
+let rawExistsSync = existsSync;
+try { rawExistsSync = createRequire(import.meta.url)('original-fs').existsSync; } catch {}
 
 export function platformPaths({ platform = process.platform, home = homedir(), env = process.env } = {}) {
   let config, local;
@@ -23,9 +27,30 @@ export function platformPaths({ platform = process.platform, home = homedir(), e
   return {
     profile, log, logCandidates:env.AG_PULSE_LOG?[log]:[...new Set([log,profileLog,...(platform==='win32'?[join(home,'.gemini','antigravity','logs','language_server.log')]:[])])],
     settings,
+    backups: join(local, 'AntigravityPulseBackups'),
     pluginConfig: join(home, '.gemini', 'config', 'config.json'),
     data: env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(home, '.gemini', 'antigravity', 'sidecar_data', 'antigravity-pulse', 'panel', 'data'),
   };
+}
+
+export function appAsarCandidates({ platform = process.platform, home = homedir(), env = process.env } = {}) {
+  if (env.AG_PULSE_APP_ASAR) return [env.AG_PULSE_APP_ASAR];
+  const roots = platform === 'win32'
+    ? [join(env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'Programs', 'antigravity', 'resources')]
+    : platform === 'darwin'
+      ? ['/Applications/Antigravity.app/Contents/Resources', join(home, 'Applications', 'Antigravity.app', 'Contents', 'Resources')]
+      : ['/opt/Antigravity/resources', '/opt/antigravity/resources', '/usr/share/antigravity/resources'];
+  if (env.AG_PULSE_APP_RESOURCES) roots.unshift(env.AG_PULSE_APP_RESOURCES);
+  try {
+    const saved = JSON.parse(readFileSync(platformPaths({ platform, home, env }).settings, 'utf8').replace(/^\uFEFF/, ''));
+    if (typeof saved.appResources === 'string') roots.unshift(saved.appResources);
+  } catch {}
+  return [...new Set(roots.map(root => join(root, 'app.asar')))];
+}
+
+export function installedAppAsar(options) {
+  const candidates = appAsarCandidates(options);
+  return candidates.find(candidate => rawExistsSync(candidate)) || candidates[0] || null;
 }
 
 export function agentExecutables({ platform = process.platform, home = homedir(), env = process.env, arch = process.arch } = {}) {
