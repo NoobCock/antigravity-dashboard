@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.3 — 2026-11-26
+
+- Add a one-shot native Windows toast notification in `compat/asar-keepalive.mjs` when Antigravity auto-updates are repaired (`repaired-restart-needed` / `staged-pending-exit`) so users immediately know a single restart restores the inline dashboard.
+- Remove the running-turn model selector unlock and deferred model switch workaround from `compat/inline-widget.cjs` and `compat/i18n.cjs` now that Antigravity natively restored model list access while running.
+
 ## 0.9.2 — 2026-11-25
 
 - Add pure-Node self-healing ASAR keep-alive (`compat/asar-keepalive.mjs`) in the panel sidecar so Antigravity auto-updates no longer require re-running the install script manually to restore inline session stats. Uses `original-fs` under `ELECTRON_RUN_AS_NODE`, preserves full `AntigravityPulseBackups` parity with `patch-loader.py --restore` / `manage.py uninstall`, and falls back to a bounded detached exit-waiter when `Antigravity.exe` holds `app.asar` locked (`EBUSY`/`EPERM`/`EACCES`).

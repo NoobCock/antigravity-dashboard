@@ -81,6 +81,7 @@ const integration = new RuntimeUi({
 const keepAlive = new AsarKeepAlive({
   owns: () => ownership ? ownership.isOwner() : true,
   enabled: () => { const s = runtimeSettings(); return s.enabled !== false && s.inline !== false && s.mode !== 'legacy'; },
+  getLanguage: async () => (await preferences.snapshot().catch(() => null))?.language || 'zh-CN',
 });
 
 if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {

@@ -315,288 +315,6 @@ module.exports = function installAgPulseInlineWidget() {
   // the pointer departs. Only keyboard-visible focus keeps a card engaged.
   // The explicit first-use action moves focus into language choices. Keep
   // that guided destination available until the user chooses or leaves it.
-  const isModelLocked=el=>Boolean(el?.isConnected&&(el.getAttribute('aria-disabled')==='true'||el.disabled===true));
-  const ORIG_SET_MODEL=Symbol('agPulseOrigSetSelectedModel');
-  const NATIVE_MODEL_STYLE_ID='ag-pulse-native-model-style';
-  const NATIVE_MODEL_NOTE_ID='ag-pulse-native-model-note';
-  const DEFERRED_MODEL_TIP='Model will be changed after this turn';
-  let watchedModel=null,queuedSwitch=null,nativeMenuForced=false,nativeOpenedAt=0,nativeOpenTimer=null,nativeCloseTimer=null,nativeModelStyle=null,nativeStoreUnsub=null,nativeReasserting=false;
-  const patchedContexts=new Set();
-  const ensureNativeModelStyle=()=>{
-    if(nativeModelStyle?.isConnected)return;
-    nativeModelStyle=document.getElementById(NATIVE_MODEL_STYLE_ID);
-    if(!nativeModelStyle){
-      nativeModelStyle=document.createElement('style');
-      nativeModelStyle.id=NATIVE_MODEL_STYLE_ID;
-      nativeModelStyle.textContent='@layer base{html body button[data-testid="model-selector-trigger"][aria-disabled="true"]{cursor:pointer!important;opacity:1!important}html body button[data-testid="model-selector-trigger"][aria-disabled="true"]:hover{background-color:var(--color-secondary,rgba(128,128,128,.12))!important}}html body button[data-testid="model-selector-trigger"][aria-disabled="true"]{cursor:pointer!important;opacity:1!important}[data-ag-pulse-model-open="1"] [role="tooltip"],[data-ag-pulse-model-open="1"] .react-tooltip{opacity:0!important;visibility:hidden!important;pointer-events:none!important}#'+NATIVE_MODEL_NOTE_ID+'{font-size:11px;font-weight:400;opacity:.75;white-space:nowrap;flex:none}';
-      (document.head||document.documentElement).append(nativeModelStyle);
-    }
-  };
-  const rewriteLockedModelTooltips=()=>{
-    if(!isModelLocked(watchedModel))return;
-    for(const tip of document.querySelectorAll('[role="tooltip"]')){
-      if(/Model cannot be changed while the agent is running/i.test(tip.textContent||'')){
-        tip.textContent=DEFERRED_MODEL_TIP;
-      }
-    }
-  };
-  const syncNativeMenuNote=popup=>{
-    if(!popup?.isConnected)return;
-    const existing=popup.querySelector('#'+NATIVE_MODEL_NOTE_ID);
-    if(!nativeMenuForced||!isModelLocked(watchedModel)){existing?.remove();return;}
-    if(existing)return;
-    const header=Array.from(popup.querySelectorAll('div,span,p')).find(el=>el.children.length===0&&/^Model$/i.test((el.textContent||'').trim()));
-    if(!header)return;
-    const note=document.createElement('span');
-    note.id=NATIVE_MODEL_NOTE_ID;
-    note.textContent=DEFERRED_MODEL_TIP;
-    header.style.display='flex';
-    header.style.alignItems='baseline';
-    header.style.justifyContent='space-between';
-    header.style.gap='8px';
-    header.append(note);
-  };
-  const setNativeModelOpenAttr=open=>{
-    if(open)document.documentElement.dataset.agPulseModelOpen='1';
-    else delete document.documentElement.dataset.agPulseModelOpen;
-  };
-  const findModelSelectorParts=el=>{
-    if(!el?.isConnected)return null;
-    try{
-      const fk=Object.keys(el).find(k=>k.startsWith('__reactFiber$'));
-      let f=fk?el[fk]:null,store=null,ctx=null,ctxFiber=null;
-      for(let i=0;i<30&&f;i++,f=f.return){
-        const v=f.memoizedProps?.value;
-        if(!store&&v&&typeof v==='object'&&v.store&&typeof v.store.update==='function')store=v.store;
-        if(!ctx&&v&&typeof v==='object'&&typeof v.setSelectedModel==='function'&&Array.isArray(v.modelOptions)){ctx=v;ctxFiber=f;}
-        if(store&&ctx)break;
-      }
-      return (store||ctx)?{store,ctx,ctxFiber}:null;
-    }catch{return null;}
-  };
-  const wrapModelContextTarget=target=>{
-    if(!target||typeof target.setSelectedModel!=='function'||target.setSelectedModel[ORIG_SET_MODEL])return;
-    const orig=target.setSelectedModel;
-    const wrapped=option=>{
-      if(isModelLocked(watchedModel)||target.lockedReason!==undefined){
-        queueModelSwitch(option);
-        closeNativeModelMenu();
-        return;
-      }
-      return orig(option);
-    };
-    wrapped[ORIG_SET_MODEL]=orig;
-    target.setSelectedModel=wrapped;
-    patchedContexts.add(target);
-  };
-  const patchModelContext=el=>{
-    const parts=findModelSelectorParts(el);
-    if(!parts?.ctxFiber)return parts;
-    wrapModelContextTarget(parts.ctxFiber.memoizedProps?.value);
-    wrapModelContextTarget(parts.ctxFiber.alternate?.memoizedProps?.value);
-    return parts;
-  };
-  const restorePatchedContexts=()=>{
-    for(const target of patchedContexts){
-      try{
-        const orig=target?.setSelectedModel?.[ORIG_SET_MODEL];
-        if(typeof orig==='function')target.setSelectedModel=orig;
-      }catch{}
-    }
-    patchedContexts.clear();
-  };
-  const shortModelLabel=label=>String(label||'').replace(/^Gemini\s+/i,'').replace(/^Claude\s+/i,'').replace(/\s*\(([^)]+)\)\s*$/,' $1').replace(/\bXHigh\b/i,'XHigh').trim();
-  const normModelName=s=>String(s||'').replace(/[()]/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
-  const sameModelOption=(a,b)=>{
-    if(!a||!b)return false;
-    if(a===b)return true;
-    if(a.value!=null&&b.value!=null&&a.value===b.value)return true;
-    if(a.modelId&&b.modelId&&a.modelId===b.modelId)return true;
-    if(a.model&&b.model&&a.model===b.model)return true;
-    const al=normModelName(a.label),bl=normModelName(b.label);
-    return Boolean(al&&bl&&al===bl);
-  };
-  const renderQueuedChip=()=>{
-    const chip=$('queued-model-chip');if(!chip)return;
-    const valid=Boolean(queuedSwitch&&(!queuedSwitch.conversationId||queuedSwitch.conversationId===conversationId()));
-    hidden(chip,!valid);
-    if(!valid)return;
-    text('queued-model-label',`→ ${queuedSwitch.shortLabel}`);
-    chip.title=t('modelsQueuedTip',{model:queuedSwitch.label});
-    chip.setAttribute('aria-label',chip.title);
-  };
-  const queueModelSwitch=option=>{
-    if(!option)return;
-    const ctx=findModelSelectorParts(watchedModel)?.ctx;
-    const cur=ctx?.selectedModel;
-    const curBtnLabel=watchedModel?.getAttribute('data-model-label')||'';
-    const isCurrent=sameModelOption(cur,option)||(curBtnLabel&&normModelName(curBtnLabel)===normModelName(option.label));
-    if(isCurrent||sameModelOption(queuedSwitch,option)){
-      queuedSwitch=null;
-    }else{
-      queuedSwitch={conversationId:conversationId(),value:option.value,modelId:option.modelId||null,model:option.model||null,label:option.label,shortLabel:shortModelLabel(option.label)};
-    }
-    renderQueuedChip();
-    fit();
-  };
-  const isNativeMenuHovered=()=>{
-    if(watchedModel?.matches(':hover'))return true;
-    const store=findModelSelectorParts(watchedModel)?.store;
-    if(store?.state?.popupElement?.matches(':hover'))return true;
-    for(const m of document.querySelectorAll('[data-base-ui-portal] [role="menu"]'))if(m.matches(':hover'))return true;
-    return false;
-  };
-  const isInsideNativeMenus=target=>{
-    if(!(target instanceof Element))return false;
-    if(watchedModel&&(target===watchedModel||watchedModel.contains(target)))return true;
-    const store=findModelSelectorParts(watchedModel)?.store;
-    if(store?.state?.popupElement?.contains(target))return true;
-    return Boolean(target.closest('[data-base-ui-portal] [role="menu"]'));
-  };
-  const unsubNativeStore=()=>{
-    if(typeof nativeStoreUnsub==='function'){try{nativeStoreUnsub();}catch{}}
-    nativeStoreUnsub=null;
-  };
-  const closeNativeModelMenu=()=>{
-    clearTimeout(nativeOpenTimer);nativeOpenTimer=null;
-    clearTimeout(nativeCloseTimer);nativeCloseTimer=null;
-    unsubNativeStore();
-    const wasForced=nativeMenuForced;
-    nativeMenuForced=false;
-    nativeOpenedAt=0;
-    setNativeModelOpenAttr(false);
-    document.getElementById(NATIVE_MODEL_NOTE_ID)?.remove();
-    if(!wasForced)return;
-    const store=findModelSelectorParts(watchedModel)?.store;
-    if(store?.state?.open||store?.state?.openProp||store?.state?.mounted){
-      try{store.update({open:false,openProp:false,mounted:false});}catch{}
-    }
-  };
-  const scheduleCloseNativeMenu=()=>{
-    clearTimeout(nativeCloseTimer);
-    nativeCloseTimer=setTimeout(()=>{
-      nativeCloseTimer=null;
-      if(nativeMenuForced&&!isNativeMenuHovered())closeNativeModelMenu();
-    },260);
-  };
-  const openNativeModelMenu=()=>{
-    if(disposed||!isModelLocked(watchedModel)||usageDashboard?.isOpen)return;
-    clearTimeout(nativeOpenTimer);nativeOpenTimer=null;
-    clearTimeout(nativeCloseTimer);nativeCloseTimer=null;
-    hide();
-    const parts=patchModelContext(watchedModel);
-    if(!parts?.store)return;
-    const {store}=parts;
-    unsubNativeStore();
-    nativeMenuForced=true;
-    nativeOpenedAt=Date.now();
-    setNativeModelOpenAttr(true);
-    rewriteLockedModelTooltips();
-    const openState={open:true,openProp:true,mounted:true,allowMouseEnter:true,hoverEnabled:true,openMethod:'mouse',activeTriggerElement:watchedModel,activeTriggerId:watchedModel.id||null};
-    try{
-      store.update(openState);
-      if(typeof store.subscribe==='function'){
-        nativeStoreUnsub=store.subscribe(()=>{
-          if(!nativeMenuForced||nativeReasserting||disposed||!isModelLocked(watchedModel))return;
-          const st=store.state;
-          if(st&&(!st.open||!st.openProp||!st.mounted)){
-            nativeReasserting=true;
-            try{store.update(openState);}finally{nativeReasserting=false;}
-          }
-          if(st?.popupElement)syncNativeMenuNote(st.popupElement);
-        });
-      }
-      requestAnimationFrame(()=>{if(nativeMenuForced&&store.state?.popupElement)syncNativeMenuNote(store.state.popupElement);});
-    }catch{
-      unsubNativeStore();nativeMenuForced=false;nativeOpenedAt=0;setNativeModelOpenAttr(false);
-    }
-  };
-  const flushQueuedModelSwitch=()=>{
-    if(nativeMenuForced&&!isModelLocked(watchedModel)){
-      unsubNativeStore();nativeMenuForced=false;nativeOpenedAt=0;setNativeModelOpenAttr(false);
-      document.getElementById(NATIVE_MODEL_NOTE_ID)?.remove();
-      clearTimeout(nativeCloseTimer);nativeCloseTimer=null;
-    }
-    if(!queuedSwitch)return;
-    const cid=conversationId();
-    if(queuedSwitch.conversationId&&cid&&queuedSwitch.conversationId!==cid){queuedSwitch=null;renderQueuedChip();return;}
-    if(!watchedModel?.isConnected||isModelLocked(watchedModel))return;
-    const ctx=findModelSelectorParts(watchedModel)?.ctx;
-    if(!ctx||ctx.lockedReason!==undefined)return;
-    const target=(ctx.modelOptions||[]).find(m=>!m.disabled&&sameModelOption(m,queuedSwitch));
-    queuedSwitch=null;
-    renderQueuedChip();
-    if(target){
-      const apply=ctx.setSelectedModel?.[ORIG_SET_MODEL]||ctx.setSelectedModel;
-      try{apply(target);}catch{}
-    }
-    fit();
-  };
-  const onModelEnter=()=>{
-    if(!isModelLocked(watchedModel)||usageDashboard?.isOpen)return;
-    rewriteLockedModelTooltips();
-    clearTimeout(nativeCloseTimer);nativeCloseTimer=null;
-    if(nativeMenuForced)return;
-    clearTimeout(nativeOpenTimer);
-    const target=watchedModel,conversation=conversationId();
-    nativeOpenTimer=setTimeout(()=>{
-      nativeOpenTimer=null;
-      if(disposed||watchedModel!==target||!target?.isConnected||!target.matches(':hover')||!isModelLocked(target)||conversationId()!==conversation)return;
-      openNativeModelMenu();
-    },60);
-  };
-  const onModelLeave=()=>{
-    clearTimeout(nativeOpenTimer);nativeOpenTimer=null;
-    if(nativeMenuForced)scheduleCloseNativeMenu();
-  };
-  const onModelClick=event=>{
-    if(!isModelLocked(watchedModel)||usageDashboard?.isOpen)return;
-    event.preventDefault();event.stopPropagation();
-    if(nativeMenuForced){
-      if(Date.now()-nativeOpenedAt>450)closeNativeModelMenu();
-    }else{
-      openNativeModelMenu();
-    }
-  };
-  const onNativeMenuPointerMove=()=>{
-    if(!nativeMenuForced)return;
-    if(isNativeMenuHovered()){clearTimeout(nativeCloseTimer);nativeCloseTimer=null;}
-    else if(!nativeCloseTimer)scheduleCloseNativeMenu();
-  };
-  const onNativeMenuSelectGuard=event=>{
-    if(!nativeMenuForced||!isModelLocked(watchedModel))return;
-    if(event.type==='keydown'&&event.key!=='Enter'&&event.key!==' ')return;
-    const target=event.target instanceof Element?event.target:null;
-    if(!target||target===watchedModel||watchedModel?.contains(target))return;
-    const menuItem=target.closest('[data-base-ui-portal] [role="menuitem"],[data-base-ui-portal] [role="menuitemradio"]');
-    if(!menuItem)return;
-    const parts=findModelSelectorParts(watchedModel);
-    if(parts?.ctx?.setSelectedModel?.[ORIG_SET_MODEL])return;
-    // Context was recreated by a React re-render while open; never leak an unwrapped switch mid-turn.
-    event.preventDefault();event.stopImmediatePropagation();
-    patchModelContext(watchedModel);
-    const lbl=menuItem.getAttribute('data-model-label')||'';
-    const match=lbl&&(parts?.ctx?.modelOptions||[]).find(m=>!m.disabled&&m.label===lbl);
-    if(match)queueModelSwitch(match);
-    closeNativeModelMenu();
-  };
-  function bindModelTrigger(el){
-    const next=el||null;
-    if(watchedModel===next)return;
-    if(watchedModel){
-      closeNativeModelMenu();
-      watchedModel.removeEventListener('pointerenter',onModelEnter);
-      watchedModel.removeEventListener('pointerleave',onModelLeave);
-      watchedModel.removeEventListener('click',onModelClick,true);
-    }
-    watchedModel=next;
-    if(watchedModel){
-      ensureNativeModelStyle();
-      watchedModel.addEventListener('pointerenter',onModelEnter);
-      watchedModel.addEventListener('pointerleave',onModelLeave);
-      watchedModel.addEventListener('click',onModelClick,true);
-    }
-  }
   const cardEngaged=()=>Boolean(root?.activeElement?.matches(':focus-visible')||(guideOpened&&!guideDismissed&&cardName==='context'&&root?.activeElement?.matches('[data-language-choice]'))||groupMenu||node?.matches(':hover')||root?.querySelector('.card:not([hidden]):hover'));
   function cardVisibility(element,visible){
     if(visible){hidden(element,false);if(element.hasAttribute('popover')&&!element.matches(':popover-open'))element.showPopover();}
@@ -772,7 +490,6 @@ module.exports = function installAgPulseInlineWidget() {
     }
     const found=findComposer();
     if(!found){
-      bindModelTrigger(null);
       stopDensityMotion();densityFrame=null;densityProbe=null;composer=null;resizeObserver?.disconnect();
       if(node){
         hide();usageDashboard?.dispose();usageDashboard=null;themeController?.dispose();themeController=null;
@@ -788,7 +505,6 @@ module.exports = function installAgPulseInlineWidget() {
     composer=found;
     if(syncConversation())render();
     const {editor,model,row,branch}=found;
-    bindModelTrigger(model);
     if(node)node.dataset.scope=found.kind;
     if(node?.isConnected&&node.parentElement===row&&node.previousElementSibling===branch)return;
     if(node){stopDensityMotion();densityFrame=null;densityProbe=null;hide();row.insertBefore(node,branch.nextSibling);observeComposer();themeController?.dispose();themeController=theme.attach(node,{embedded:true});if(data?.theme)themeController.setHostTheme(data.theme);fit();position();return;}
@@ -813,7 +529,6 @@ module.exports = function installAgPulseInlineWidget() {
     @media(prefers-reduced-motion:reduce){.refresh[aria-busy=true] svg{animation:none;opacity:.65}}
     </style><div class="bar" data-i18n-aria="strip" aria-label="Dashboard statistics">
       <span class="dot" id="dot" title="Connecting"></span>
-      <button type="button" class="chip queued-chip" id="queued-model-chip" hidden><span id="queued-model-label"></span><span class="queued-x" aria-hidden="true">×</span></button>
       <button class="chip" data-card="speed" data-i18n-aria="session" hidden aria-controls="speed-card" aria-expanded="false">${svg('speed')}<span class="rounds dim" id="rounds"></span><strong id="tps">—</strong><span>tok/s</span></button>
       <button class="chip" data-card="cache" data-i18n-aria="cacheTitle" hidden aria-controls="cache-card" aria-expanded="false">${svg('cache')}<span class="cache-total" id="cache-total">— tok</span><i class="chip-sep" aria-hidden="true"></i><span data-i18n="cache">Cache hit</span><strong id="cache-rate">—</strong></button>
       <button class="chip" data-card="context" data-i18n-aria="context" hidden aria-controls="context-card" aria-expanded="false"><span class="context-ring" id="context-ring" aria-hidden="true"></span><span class="context-label" data-i18n="contextShort">Ctx</span><strong id="context-percent">—</strong></button>
@@ -862,13 +577,11 @@ module.exports = function installAgPulseInlineWidget() {
       #guide-open{display:flex;align-items:center;justify-content:space-between;gap:12px;text-align:left;width:calc(100% + 8px);margin:5px -4px -3px;padding:4px;line-height:16px}
       #guide-open>span{display:grid;gap:1px}#guide-open span[lang]{font-size:10px;color:var(--pulse-muted)}#guide-open svg{width:14px;height:14px;flex:none}
       #guide-save-note:empty,#language-save-note:empty{display:none}#guide-save-note,#language-save-note{color:var(--pulse-warning)}
-      .queued-chip{color:var(--pulse-accent)!important;background:color-mix(in srgb,var(--pulse-accent) 12%,transparent)!important;border-radius:99px!important;padding:2px 7px!important;font-size:10px!important;gap:4px!important;max-width:150px}.queued-chip:hover{background:color-mix(in srgb,var(--pulse-accent) 20%,transparent)!important}#queued-model-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.queued-x{opacity:.7;font-size:11px;line-height:1}
       .card-update{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--pulse-separator);font-size:10px;color:var(--pulse-muted)}.card-update[hidden]{display:none}
       .update-info{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}.update-info[data-state=available]{color:var(--pulse-accent);font-weight:500}.update-info[data-state=updated]{color:var(--pulse-success)}.update-info[data-state=error]{color:var(--pulse-warning)}
       .update-actions{display:flex;align-items:center;gap:4px;flex:none}
       .update-btn{border:0;background:var(--pulse-control);color:var(--pulse-muted);border-radius:4px;font-size:10px;padding:3px 6px;line-height:14px;cursor:pointer;transition:background-color 140ms ease,color 140ms ease}.update-btn:hover:not(:disabled){background:var(--pulse-hover);color:var(--pulse-foreground)}.update-btn:disabled{opacity:.6;cursor:wait}.update-btn[data-primary=true]{background:color-mix(in srgb,var(--pulse-accent) 16%,transparent);color:var(--pulse-accent);font-weight:500}.update-btn[aria-pressed=true]{color:var(--pulse-foreground);background:var(--pulse-hover)}
     `;root.append(guideStyle);
-    $('queued-model-chip').addEventListener('click',()=>{queuedSwitch=null;renderQueuedChip();fit();});
     const runUpdateAction=async payload=>{
       if(!host()?.runUpdate)return;
       try{
@@ -1008,7 +721,7 @@ module.exports = function installAgPulseInlineWidget() {
       const updNote=window==='weekly'&&!errNote&&data.quotaUpdatedAt?t('updated',{time:new Date(data.quotaUpdatedAt).toLocaleTimeString(language.language,{hour12:false})}):'';
       text(`${name}-note`,[composer?.kind==='subagent'&&window==='5h'?t('accountQuota'):'',errNote,updNote].filter(Boolean).join(' — '));
     }
-    attribute($('dot'),'class',`dot ${data.connection}`);attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));renderQueuedChip();renderUpdateRow();tick();fit();position();
+    attribute($('dot'),'class',`dot ${data.connection}`);attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));renderUpdateRow();tick();fit();position();
   }
   function renderUpdateRow(){
     const row=$('update-row');if(!row)return;
@@ -1040,7 +753,6 @@ module.exports = function installAgPulseInlineWidget() {
   }
   function tick(){
     if(!root)return;
-    flushQueuedModelSwitch();
     for(const [window,name]of[['5h','five'],['weekly','week']]){const b=group?.windows?.[window];text(`${name}-timer`,timer(b?.resetAt,true));text(`${name}-countdown`,timer(b?.resetAt));if(b?.resetAt&&Date.parse(b.resetAt)<=Date.now()&&Date.now()-lastExpiredRefresh>30000){lastExpiredRefresh=Date.now();refresh(true);}}
   }
   function refreshBusy(busy){
@@ -1081,23 +793,16 @@ module.exports = function installAgPulseInlineWidget() {
     })();
     return refreshRequest;
   }
-  const observer=new MutationObserver(records=>{if(records.some(record=>record.target!==node&&!node?.contains(record.target))){rewriteLockedModelTooltips();flushQueuedModelSwitch();scheduleLayout();}});observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden','inert','data-cascade-id','data-testid','data-tooltip-id','aria-label','aria-disabled','disabled','role','contenteditable']});
-  const onKey=e=>{if(e.key==='Escape'){hide();closeNativeModelMenu();}}, onPointer=e=>{if(node&&!e.composedPath().includes(node))hide();if(nativeMenuForced&&!isInsideNativeMenus(e.target))closeNativeModelMenu();};
+  const observer=new MutationObserver(records=>{if(records.some(record=>record.target!==node&&!node?.contains(record.target)))scheduleLayout();});observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden','inert','data-cascade-id','data-testid','data-tooltip-id','aria-label','role','contenteditable']});
+  const onKey=e=>{if(e.key==='Escape')hide();}, onPointer=e=>{if(node&&!e.composedPath().includes(node))hide();};
   document.addEventListener('keydown',onKey);document.addEventListener('pointerdown',onPointer);
-  document.addEventListener('pointermove',onNativeMenuPointerMove,{passive:true});
-  document.addEventListener('click',onNativeMenuSelectGuard,true);
-  document.addEventListener('keydown',onNativeMenuSelectGuard,true);
   window.addEventListener('resize',scheduleLayout);document.addEventListener('scroll',scheduleLayout,true);
   densityMedia.addEventListener('change',stopDensityMotion);
-  const timerId=setInterval(()=>{mount();flushQueuedModelSwitch();if(nativeMenuForced&&!isNativeMenuHovered()&&!nativeCloseTimer)scheduleCloseNativeMenu();fit();tick();position();if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:2200))refresh();},1000);
+  const timerId=setInterval(()=>{mount();fit();tick();position();if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:2200))refresh();},1000);
   window.__agPulseDispose=()=>{
     disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;
-    bindModelTrigger(null);closeNativeModelMenu();restorePatchedContexts();nativeModelStyle?.remove();nativeModelStyle=null;queuedSwitch=null;
     clearInterval(timerId);clearTimeout(hoverTimer);clearTimeout(openTimer);if(layoutFrame!==null)cancelAnimationFrame(layoutFrame);observer.disconnect();resizeObserver?.disconnect();themeController?.dispose();preferences.dispose();hide();usageDashboard?.dispose();node?.remove();
     document.removeEventListener('keydown',onKey);document.removeEventListener('pointerdown',onPointer);
-    document.removeEventListener('pointermove',onNativeMenuPointerMove);
-    document.removeEventListener('click',onNativeMenuSelectGuard,true);
-    document.removeEventListener('keydown',onNativeMenuSelectGuard,true);
     document.removeEventListener('scroll',scheduleLayout,true);window.removeEventListener('resize',scheduleLayout);
     densityMedia.removeEventListener('change',stopDensityMotion);
     document.removeEventListener('DOMContentLoaded',mount);node=null;root=null;composer=null;

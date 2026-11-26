@@ -273,6 +273,41 @@ function isPidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
 }
 
+function defaultNotify({ status, appVersion, language = 'zh-CN', env = process.env } = {}) {
+  if (process.platform !== 'win32') return;
+  const flag = String(env?.AG_PULSE_DISABLE_KEEPALIVE_NOTIFY || '').trim().toLowerCase();
+  if (flag === '1' || flag === 'true' || flag === 'yes' || env?.NODE_TEST_CONTEXT) return;
+  const zh = language === 'zh-CN';
+  const ver = appVersion ? `v${appVersion}` : (zh ? '新版本' : 'latest build');
+  const title = zh ? 'Antigrative Dashboard 自动保活已完成' : 'Antigrative Dashboard Auto-Repaired';
+  const body = status === 'staged-pending-exit'
+    ? (zh ? `检测到 Antigravity 已更新至 ${ver}，补丁已就绪；退出并重开 Antigravity 将自动恢复状态条。`
+          : `Detected Antigravity ${ver}. Repair is staged and will apply when Antigravity restarts.`)
+    : (zh ? `检测到 Antigravity 已更新至 ${ver}，已自动修补内嵌状态条；重启一次 Antigravity 即可恢复显示。`
+          : `Detected Antigravity ${ver} and auto-repaired the inline status bar. Restart Antigravity once to activate.`);
+  const ps = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    "$t=[System.Security.SecurityElement]::Escape($env:AG_NOTIFY_TITLE)",
+    "$b=[System.Security.SecurityElement]::Escape($env:AG_NOTIFY_BODY)",
+    "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]|Out-Null",
+    "[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]|Out-Null",
+    "$xml=New-Object Windows.Data.Xml.Dom.XmlDocument",
+    "$xml.LoadXml(\"<toast><visual><binding template='ToastGeneric'><text>$t</text><text>$b</text></binding></visual></toast>\")",
+    "$toast=[Windows.UI.Notifications.ToastNotification]::new($xml)",
+    "$appId='{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'",
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)",
+  ].join(';');
+  try {
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps], {
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+      env: { ...process.env, AG_NOTIFY_TITLE: title, AG_NOTIFY_BODY: body },
+    });
+    child.unref();
+  } catch {}
+}
+
 function defaultSpawnWaiter({ target, stagedPath, originalSha, patchedSha, statePath, appVersion, timeoutMs = WAITER_TIMEOUT_MS, pollMs = WAITER_POLL_MS }) {
   const child = spawn(process.execPath, [SELF_FILE, '--apply-staged'], {
     detached: true,
@@ -389,6 +424,8 @@ export class AsarKeepAlive {
     startupDelayMs = STARTUP_DELAY_MS,
     writeTarget = (p, buf) => writeFile(p, buf),
     spawnWaiter = defaultSpawnWaiter,
+    notify = defaultNotify,
+    getLanguage = async () => 'zh-CN',
   } = {}) {
     this.platform = platform;
     this.appAsar = typeof appAsar === 'function' ? appAsar : () => appAsar;
@@ -402,6 +439,8 @@ export class AsarKeepAlive {
     this.startupDelayMs = startupDelayMs;
     this.writeTarget = writeTarget;
     this.spawnWaiter = spawnWaiter;
+    this.notify = notify;
+    this.getLanguage = getLanguage;
 
     this.running = false;
     this.busy = false;
@@ -409,6 +448,7 @@ export class AsarKeepAlive {
     this.watchTimer = null;
     this.lastStatKey = null;
     this.lastFailedSha = null;
+    this.notifiedKey = null;
     this.waiterPid = null;
     this.waiterSha = null;
     this.waiterUntil = 0;
@@ -449,6 +489,17 @@ export class AsarKeepAlive {
 
   async persistState() {
     await writeAtomicJson(this.statePath(), this.state);
+  }
+
+  async notifyOnce(status, appVersion, uniqueKey) {
+    if (typeof this.notify !== 'function') return;
+    const key = `${status}:${appVersion || ''}:${uniqueKey || ''}`;
+    if (this.notifiedKey === key) return;
+    this.notifiedKey = key;
+    try {
+      const language = await this.getLanguage();
+      this.notify({ status, appVersion, language, env: this.env });
+    } catch {}
   }
 
   async check({ force = false, now = Date.now() } = {}) {
@@ -587,6 +638,7 @@ export class AsarKeepAlive {
             error: null,
           };
           await this.persistState();
+          await this.notifyOnce('staged-pending-exit', version, currentSha);
           return this.snapshot();
         }
         throw writeErr;
@@ -606,6 +658,7 @@ export class AsarKeepAlive {
         error: null,
       };
       await this.persistState();
+      await this.notifyOnce('repaired-restart-needed', version, currentSha);
       return this.snapshot();
     } catch (error) {
       this.state = {

@@ -62,6 +62,7 @@ test('AsarKeepAlive auto-repairs unpatched app.asar after host updates and prese
   const original235 = sampleAppAsar({ version: '2.35.0' });
   await writeFile(appPath, original235);
 
+  const notices = [];
   const keepAlive = new AsarKeepAlive({
     platform: 'win32',
     appAsar: appPath,
@@ -70,6 +71,7 @@ test('AsarKeepAlive auto-repairs unpatched app.asar after host updates and prese
     enabled: () => true,
     owns: async () => true,
     env: {},
+    notify: info => notices.push(info),
   });
 
   // 1. First check detects unpatched 2.35.0 and repairs automatically
@@ -78,6 +80,9 @@ test('AsarKeepAlive auto-repairs unpatched app.asar after host updates and prese
   assert.equal(first.appVersion, '2.35.0');
   assert.equal(first.restartRequired, true);
   assert.equal(first.error, null);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].status, 'repaired-restart-needed');
+  assert.equal(notices[0].appVersion, '2.35.0');
 
   const patched235 = await readFile(appPath);
   const inspected = inspectAsar(patched235);
@@ -174,6 +179,7 @@ test('AsarKeepAlive stages pending-app.asar on EBUSY lock and runStagedWaiter ap
   await writeFile(appPath, original235);
 
   const spawned = [];
+  const lockNotices = [];
   const ebusy = Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
   const keepAlive = new AsarKeepAlive({
     platform: 'win32',
@@ -185,6 +191,7 @@ test('AsarKeepAlive stages pending-app.asar on EBUSY lock and runStagedWaiter ap
     env: {},
     writeTarget: async () => { throw ebusy; },
     spawnWaiter: opts => { spawned.push(opts); return { pid: process.pid }; },
+    notify: info => lockNotices.push(info),
   });
 
   const first = await keepAlive.check({ now: Date.UTC(2026, 10, 25, 4, 0, 0) });
@@ -192,12 +199,15 @@ test('AsarKeepAlive stages pending-app.asar on EBUSY lock and runStagedWaiter ap
   assert.equal(first.appVersion, '2.35.0');
   assert.equal(first.restartRequired, true);
   assert.equal(spawned.length, 1);
+  assert.equal(lockNotices.length, 1);
+  assert.equal(lockNotices[0].status, 'staged-pending-exit');
   assert.equal(existsSync(spawned[0].stagedPath), true);
 
-  // Repeated check while waiter is still alive does NOT spawn duplicates
+  // Repeated check while waiter is still alive does NOT spawn duplicates or re-notify
   const second = await keepAlive.check({ now: Date.UTC(2026, 10, 25, 4, 1, 0) });
   assert.equal(second.status, 'staged-pending-exit');
   assert.equal(spawned.length, 1);
+  assert.equal(lockNotices.length, 1);
 
   // Simulate lock holding for 2 polls, then releasing on the 3rd attempt
   let attempts = 0;
