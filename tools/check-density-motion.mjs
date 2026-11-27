@@ -97,14 +97,14 @@ try{
     Element.prototype.animate=function(...args){animations++;return animate.apply(this,args);};
     const observer=new MutationObserver(records=>{for(const r of records)for(const n of r.addedNodes)if(n.classList?.contains('density-stage'))stages++;});observer.observe(w.shadowRoot,{childList:true});
     const classes=new MutationObserver(records=>classChanges+=records.length);classes.observe(w,{attributes:true,attributeFilter:['class']});
-    let last=performance.now();
+    let last=performance.now(),started=last;
     try{
      w.style.flex='0 0 80px';w.style.maxWidth='80px';
      for(let i=0;i<75;i++){
       section.style.width=(480-i*1.5)+'px';section.style.marginLeft=(i*2.1)+'px';
       await new Promise(requestAnimationFrame);const now=performance.now();intervals.push(now-last);last=now;
       const motion=w.shadowRoot.querySelector('.density-stage');
-      if(i>35&&motion)throw new Error('Animation clock was restarted while dragging in the same density: '+JSON.stringify({clones,stages,animations}));
+      if(now-started>450&&motion)throw new Error('Animation clock was restarted while dragging in the same density: '+JSON.stringify({clones,stages,animations}));
       for(const b of document.querySelectorAll('.protected')){const r=b.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);if(hit!==b&&!b.contains(hit))throw new Error('Drag obscured a native control');}
      }
      // Stay narrow and shake within a few pixels: no density probes/animations.

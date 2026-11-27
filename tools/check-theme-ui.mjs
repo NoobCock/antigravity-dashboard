@@ -93,6 +93,7 @@ async function checkSurfaces(page,scope,inline){
       assert.ok(state.ratios.every(item=>item.ratio>=4.5),JSON.stringify(state));
       assert.equal(await scope.locator('#context-summary').textContent(),before);
       if(inline&&!(await scope.locator('#context-card').isVisible()))await scope.locator('[data-card=context]').click();
+      if(inline)await scope.locator('#context-card').evaluate(e=>Promise.all(e.getAnimations().map(a=>a.finished.catch(()=>{}))));
       await scope.locator('#context-card').screenshot({path:join(output,`custom-${fixture[0]}-${inline?'inline':'panel'}.png`)});
     }
     // Config-only background is live, sanitized, and independently supported.
@@ -269,6 +270,7 @@ try {
     for(const card of ['speed','cache','context']) {
       await host.locator(`[data-card=${card}]`).click();
       await host.locator(`#${card}-card`).waitFor({state:'visible'});
+      await host.locator(`#${card}-card`).evaluate(e=>Promise.all(e.getAnimations().map(a=>a.finished.catch(()=>{}))));
       const layering=await host.locator(`#${card}-card`).evaluate(element=>{
         const rect=element.getBoundingClientRect(),x=rect.x+rect.width/2,y=rect.y+40;
         let button=document.getElementById('test-scroll-bottom');

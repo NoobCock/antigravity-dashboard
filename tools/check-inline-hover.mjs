@@ -81,7 +81,7 @@ try{
     await page.keyboard.press('Escape');assert.equal(await card(page,'cache').isVisible(),false);
     await chip(page,'context').click();assert.equal(await card(page,'context').isVisible(),true);
     await page.keyboard.press('Escape');assert.equal(await card(page,'context').isVisible(),false);
-    await chip(page,'context').focus();assert.equal(await card(page,'context').isVisible(),true);
+    await chip(page,'speed').focus();assert.equal(await card(page,'speed').isVisible(),true);
   });
   for(const dismissal of ['Escape','outside click'])await check(`${dismissal} resets warm state`,async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(250);assert.equal(await mini(page,'speed').isVisible(),true);
