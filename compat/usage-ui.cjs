@@ -5,7 +5,7 @@ module.exports = function createUsageDashboard({root,language,setMarkup,hostLabe
   const shell=document.createElement('div'),view=shell.attachShadow({mode:'open'});shell.style.height='100%';dialog.append(shell);
   const scrim=document.createElement('div');scrim.className='usage-scrim';scrim.hidden=true;
   scrim.style.cssText='position:fixed;inset:0;margin:0;padding:0;border:0;width:100vw;height:100dvh;max-width:none;max-height:none;visibility:visible;background:rgba(0,0,0,0);backdrop-filter:blur(0px);-webkit-backdrop-filter:blur(0px);pointer-events:none;z-index:2147483645';
-  const closeGhost=document.createElement('div');closeGhost.className='usage-close-ghost';closeGhost.hidden=true;
+  const closeGhost=document.createElement('div');closeGhost.className='usage-close-ghost';closeGhost.hidden=true;closeGhost.inert=true;closeGhost.setAttribute('aria-hidden','true');
   closeGhost.style.cssText='position:fixed;inset:auto;margin:0;padding:0;border:1px solid var(--pulse-border);border-radius:18px;visibility:visible;background:var(--pulse-background);color:var(--pulse-foreground);box-shadow:0 18px 48px var(--pulse-shadow);overflow:hidden;pointer-events:none;z-index:2147483646';
   const ghostView=closeGhost.attachShadow({mode:'open'}),ghostStyle=document.createElement('style');ghostView.append(ghostStyle);
   const hasPopover=typeof HTMLElement!=='undefined'&&typeof HTMLElement.prototype.showPopover==='function';
@@ -133,6 +133,7 @@ module.exports = function createUsageDashboard({root,language,setMarkup,hostLabe
       if(hasPopover&&closeGhost.matches(':popover-open'))closeGhost.hidePopover();
       closeGhost.hidden=true;
     }
+    for(const prev of [...ghostView.children])if(prev!==ghostStyle)prev.remove();
   }
   const zh=()=>language.language==='zh-CN',w=(cn,en)=>zh()?cn:en;
   const fmtUsd=n=>typeof n!=='number'||!Number.isFinite(n)?'—':n===0?'$0':n>=1000?'$'+Math.round(n).toLocaleString('en-US'):n>=100?'$'+n.toFixed(1):n>=1?'$'+n.toFixed(2):'$'+n.toFixed(3);
@@ -1085,6 +1086,12 @@ module.exports = function createUsageDashboard({root,language,setMarkup,hostLabe
         ghostStyle.textContent=css.textContent;
         for(const prev of [...ghostView.children])if(prev!==ghostStyle)prev.remove();
         clonedPage=page.cloneNode(true);
+        clonedPage.removeAttribute('id');
+        for(const el of clonedPage.querySelectorAll('[id],[popover],[role]')){
+          el.removeAttribute('id');
+          el.removeAttribute('popover');
+          el.removeAttribute('role');
+        }
         ghostView.append(clonedPage);
         clonedPage.scrollTop=page.scrollTop;
       }
