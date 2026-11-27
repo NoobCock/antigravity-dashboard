@@ -63,12 +63,9 @@ try{
       assert.equal(await strip.count(),1);
       const boundary=await strip.evaluate(e=>{const container=e.closest('[data-composer]'),editor=container.querySelector('.editor');return {sameContainer:container.contains(e)&&container.contains(editor),separateBranch:!e.parentElement.contains(editor)};});
       assert.deepEqual(boundary,{sameContainer:true,separateBranch:true});
-      await strip.locator('[data-card=context]').hover();
+      await strip.locator('[data-card=context]').click();
       await strip.locator('#context-summary').waitFor({state:'visible'});
       assert.match(await strip.locator('#context-summary').textContent(),/44%/);
-      const expected=key.startsWith('legacy')?'Gemini':'Claude / GPT';
-      assert.ok((await strip.locator('.group-trigger').textContent()).includes(expected),'Model selection must read the localized composer control');
-      await strip.locator('.group-trigger').click();assert.equal(await strip.locator('.group-menu').isVisible(),true);
       await page.keyboard.press('Escape');
       // Empty/send/cancel/voice states do not change the structural mount.
       await page.evaluate(()=>{for(const b of document.querySelectorAll('.action')){b.setAttribute('aria-label','任意翻译');b.textContent='发送';}});

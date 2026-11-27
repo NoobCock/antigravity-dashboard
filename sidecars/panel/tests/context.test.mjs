@@ -85,3 +85,20 @@ test('context refreshes immediately after /compact checkpoint before the next tu
   const nextTurn=trajectoryMetrics({trajectory:{cascadeId:id,steps:[...baseSteps,{type:'CORTEX_STEP_TYPE_CHECKPOINT',status:'CORTEX_STEP_STATUS_DONE',metadata:{completedAt:'2026-11-21T14:03:09Z'},checkpoint:{checkpointIndex:3,includedStepIndexEnd:3,sessionSummary:'x'.repeat(13600)}},{type:'CORTEX_STEP_TYPE_USER_INPUT'},{type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE'}],generatorMetadata:[preGen,nextGen]}});
   assert.equal(nextTurn.context.usedTokens,27420);
 });
+
+test('context breakdown normalizes all 7 host token categories, drops private names, and survives post-compact',()=>{
+  const rawGen={stepIndices:[1],chatModel:{modelDisplayName:'Gemini 4',usage:{messageId:'m1',inputTokens:'100',responseOutputTokens:'50',apiProvider:'API_PROVIDER_GOOGLE_GEMINI'},streamingDuration:'1s',chatStartMetadata:{contextWindowMetadata:{estimatedTokensUsed:214523,maxContextTokens:512000,tokenBreakdown:{totalTokens:214523,groups:[
+    {type:'TOKEN_TYPE_SYSTEM_PROMPT',name:'PRIVATE_SYS',numTokens:3827},
+    {type:'TOKEN_TYPE_MCP_TOOLS',name:'PRIVATE_MCP',numTokens:1258},
+    {type:'TOKEN_TYPE_SUBAGENTS',numTokens:2885},
+    {type:'TOKEN_TYPE_SKILLS',numTokens:2734},
+    {type:'TOKEN_TYPE_PLUGINS',numTokens:1631},
+    {type:'TOKEN_TYPE_TOOLS',numTokens:9766},
+    {type:'TOKEN_TYPE_CHAT_MESSAGES',numTokens:192422},
+  ]}}}}};
+  const m=trajectoryMetrics({trajectory:{cascadeId:id,steps:[{type:'CORTEX_STEP_TYPE_USER_INPUT'},{type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE'}],generatorMetadata:[rawGen]}});
+  assert.ok(m.context.breakdown);
+  assert.equal(m.context.breakdown.items.length,7);
+  assert.deepEqual(m.context.breakdown.items.map(i=>i.key),['chat','tools','system','subagents','skills','plugins','mcp']);
+  assert.equal(JSON.stringify(m.context.breakdown).includes('PRIVATE'),false);
+});

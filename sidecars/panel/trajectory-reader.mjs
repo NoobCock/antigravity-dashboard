@@ -15,7 +15,8 @@ export class TrajectoryReader {
  trim(keep){for(const [key,e]of this.entries){if(this.cachedBytes<=this.budgetBytes)break;if(key===keep||e.pending)continue;this.cachedBytes-=e.bytes;this.entries.delete(key);}}
  async summary(id,provided,force){
   if(provided)return provided;
-  if(force||!this.summaries||this.client.now()-this.summaryAt>=1800){
+  const summaryTtl = !settled(this.summaries?.[id]?.status) ? 450 : 1800;
+  if(force||!this.summaries||this.client.now()-this.summaryAt>=summaryTtl){
    if(!this.summaryPending){const epoch=this.epoch;
     const pending=this.client.call('GetAllCascadeTrajectories').then(r=>{
      if(epoch!==this.epoch)throw unavailable();this.summaries=r.trajectorySummaries||{};this.summaryAt=this.client.now();

@@ -27,6 +27,7 @@ let browser;
 const results=[],errors=[];
 const host=page=>page.locator('#ag-pulse-status-bar');
 const chip=(page,name)=>host(page).locator(`[data-card=${name}]`);
+const mini=(page,name)=>host(page).locator(`#${name}-mini`);
 const card=(page,name)=>host(page).locator(`#${name}-card`);
 const outside=page=>page.mouse.move(10,700);
 async function check(name,run,{realTimers=false}={}){
@@ -46,45 +47,47 @@ async function check(name,run,{realTimers=false}={}){
 }
 try{
   browser=await chromium.launch(process.platform==='win32'&&!process.env.CI?{channel:'msedge',headless:true}:{headless:true});
-  await check('cold hover waits exactly 250ms',async page=>{
-    await chip(page,'speed').hover();assert.equal(await card(page,'speed').isVisible(),false);
-    await page.clock.runFor(249);assert.equal(await card(page,'speed').isVisible(),false);
-    await page.clock.runFor(1);assert.equal(await card(page,'speed').isVisible(),true);
+  await check('cold hover waits exactly 250ms and opens mini preview only',async page=>{
+    await chip(page,'speed').hover();assert.equal(await mini(page,'speed').isVisible(),false);assert.equal(await card(page,'speed').isVisible(),false);
+    await page.clock.runFor(249);assert.equal(await mini(page,'speed').isVisible(),false);
+    await page.clock.runFor(1);assert.equal(await mini(page,'speed').isVisible(),true);assert.equal(await card(page,'speed').isVisible(),false);
   });
   await check('leaving before the delay cancels opening',async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(100);
-    await outside(page);await page.clock.runFor(500);assert.equal(await card(page,'speed').isVisible(),false);
+    await outside(page);await page.clock.runFor(500);assert.equal(await mini(page,'speed').isVisible(),false);assert.equal(await card(page,'speed').isVisible(),false);
   });
   await check('switching cold chips cancels the previous timer',async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(100);
     await chip(page,'cache').hover();await page.clock.runFor(150);
-    assert.equal(await card(page,'speed').isVisible(),false);assert.equal(await card(page,'cache').isVisible(),false);
-    await page.clock.runFor(100);assert.equal(await card(page,'cache').isVisible(),true);
+    assert.equal(await mini(page,'speed').isVisible(),false);assert.equal(await mini(page,'cache').isVisible(),false);
+    await page.clock.runFor(100);assert.equal(await mini(page,'cache').isVisible(),true);assert.equal(await card(page,'cache').isVisible(),false);
   });
-  await check('warm switching and chip/card crossings remain immediate and stable',async page=>{
-    await chip(page,'speed').hover();await page.clock.runFor(250);
-    await chip(page,'cache').hover();assert.equal(await card(page,'cache').isVisible(),true);assert.equal(await card(page,'speed').isVisible(),false);
-    await card(page,'cache').hover();await page.clock.runFor(500);assert.equal(await card(page,'cache').isVisible(),true);
-    await chip(page,'context').hover();assert.equal(await card(page,'context').isVisible(),true);
-    await outside(page);await page.clock.runFor(119);assert.equal(await card(page,'context').isVisible(),true);
-    await page.clock.runFor(1);assert.equal(await card(page,'context').isVisible(),false);
+  await check('warm switching across all three mini previews remains immediate and stable',async page=>{
+    await chip(page,'speed').hover();await page.clock.runFor(250);assert.equal(await mini(page,'speed').isVisible(),true);
+    await chip(page,'cache').hover();assert.equal(await mini(page,'cache').isVisible(),true);assert.equal(await mini(page,'speed').isVisible(),false);assert.equal(await card(page,'cache').isVisible(),false);
+    await chip(page,'context').hover();assert.equal(await mini(page,'context').isVisible(),true);assert.equal(await mini(page,'cache').isVisible(),false);assert.equal(await card(page,'context').isVisible(),false);
+    await outside(page);await page.clock.runFor(120);assert.equal(await mini(page,'context').isVisible(),false);
   });
   for(const elapsed of [349,350,400])await check(`warm window expires 350ms after leaving (${elapsed}ms)`,async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(250);
-    await outside(page);await page.clock.runFor(elapsed);await chip(page,'context').hover();
-    assert.equal(await card(page,'context').isVisible(),elapsed<350);
-    if(elapsed>=350){await page.clock.runFor(249);assert.equal(await card(page,'context').isVisible(),false);await page.clock.runFor(1);assert.equal(await card(page,'context').isVisible(),true);}
+    await outside(page);await page.clock.runFor(elapsed);await chip(page,'cache').hover();
+    assert.equal(await mini(page,'cache').isVisible(),elapsed<350);
+    if(elapsed>=350){await page.clock.runFor(249);assert.equal(await mini(page,'cache').isVisible(),false);await page.clock.runFor(1);assert.equal(await mini(page,'cache').isVisible(),true);}
   });
-  await check('click and keyboard focus bypass the delay',async page=>{
-    await chip(page,'speed').click();assert.equal(await card(page,'speed').isVisible(),true);
-    await page.keyboard.press('Escape');assert.equal(await card(page,'speed').isVisible(),false);
+  await check('click and keyboard focus open full cards immediately',async page=>{
+    await chip(page,'speed').click();assert.equal(await card(page,'speed').isVisible(),true);assert.equal(await mini(page,'speed').isVisible(),false);
+    await chip(page,'speed').click();assert.equal(await card(page,'speed').isVisible(),false);
+    await chip(page,'cache').click();assert.equal(await card(page,'cache').isVisible(),true);
+    await page.keyboard.press('Escape');assert.equal(await card(page,'cache').isVisible(),false);
+    await chip(page,'context').click();assert.equal(await card(page,'context').isVisible(),true);
+    await page.keyboard.press('Escape');assert.equal(await card(page,'context').isVisible(),false);
     await chip(page,'context').focus();assert.equal(await card(page,'context').isVisible(),true);
   });
   for(const dismissal of ['Escape','outside click'])await check(`${dismissal} resets warm state`,async page=>{
-    await chip(page,'speed').hover();await page.clock.runFor(250);
+    await chip(page,'speed').hover();await page.clock.runFor(250);assert.equal(await mini(page,'speed').isVisible(),true);
     if(dismissal==='Escape')await page.keyboard.press('Escape');else await page.mouse.click(10,700);
-    await chip(page,'context').hover();assert.equal(await card(page,'context').isVisible(),false);
-    await page.clock.runFor(250);assert.equal(await card(page,'context').isVisible(),true);
+    await chip(page,'cache').hover();assert.equal(await mini(page,'cache').isVisible(),false);
+    await page.clock.runFor(250);assert.equal(await mini(page,'cache').isVisible(),true);
   });
   await check('blocked layout cancels a pending popup',async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(100);
@@ -98,12 +101,12 @@ try{
     });
     assert.ok(width>0&&width<=40,'The fixture must actually constrain the strip to 40px');
     await page.clock.runFor(16);assert.equal(await host(page).getAttribute('data-layout'),'blocked');
-    await page.clock.runFor(500);assert.equal(await host(page).getAttribute('data-layout'),'blocked');assert.equal(await card(page,'speed').isVisible(),false);
+    await page.clock.runFor(500);assert.equal(await host(page).getAttribute('data-layout'),'blocked');assert.equal(await mini(page,'speed').isVisible(),false);assert.equal(await card(page,'speed').isVisible(),false);
   });
   await check('navigation rejects an old pending popup before the next heartbeat',async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(100);
     await page.evaluate(()=>history.pushState({},'', '/c/22222222-2222-2222-2222-222222222222'));
-    await page.clock.runFor(150);assert.equal(await card(page,'speed').isVisible(),false);
+    await page.clock.runFor(150);assert.equal(await mini(page,'speed').isVisible(),false);assert.equal(await card(page,'speed').isVisible(),false);
   });
   await check('detached composer cancels pending work and recovers after remount',async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(100);
@@ -113,15 +116,15 @@ try{
     // new pointerenter. Isolate cancellation of the removed control's timer.
     await outside(page);
     await page.evaluate(()=>document.body.append(window.savedComposer));await page.clock.runFor(1000);
-    assert.equal(await host(page).count(),1);assert.equal(await card(page,'speed').isVisible(),false);
+    assert.equal(await host(page).count(),1);assert.equal(await mini(page,'speed').isVisible(),false);
     await outside(page);
-    await chip(page,'speed').hover();assert.equal(await card(page,'speed').isVisible(),false);
-    await page.clock.runFor(250);assert.equal(await card(page,'speed').isVisible(),true);
+    await chip(page,'speed').hover();assert.equal(await mini(page,'speed').isVisible(),false);
+    await page.clock.runFor(250);assert.equal(await mini(page,'speed').isVisible(),true);
   });
   await check('replacement editor does not inherit a pending hover',async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(100);
     await page.evaluate(()=>{const editor=document.querySelector('.editor');editor.replaceWith(editor.cloneNode(true));});
-    await page.clock.runFor(500);assert.equal(await card(page,'speed').isVisible(),false);
+    await page.clock.runFor(500);assert.equal(await mini(page,'speed').isVisible(),false);
   });
   await check('disposal cancels pending work',async page=>{
     await chip(page,'speed').hover();await page.clock.runFor(100);

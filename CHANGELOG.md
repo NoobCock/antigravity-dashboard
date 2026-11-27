@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0 — 2026-11-28
+
+- Redesign the TPS indicator as a dynamic SVG line chart with customizable sampling intervals (`0.5s / 1s / 2s / 5s`), live-ticking `Model time` and `Tool time`, and real-time generation throughput tracking across thinking, response, and tool-call output without synthetic flatlines when idle.
+- Unify all three inline status-bar chips (`TPS`, `Token usage`, `Ctx`) into a two-tier interaction model: hovering shows a compact glass mini-preview, while clicking smoothly morphs into the pinned full detail card and reverse-morphs back into the chip on dismissal.
+- Simplify the inline bar by dropping the redundant `tok` suffix, moving session turn/step counts and `Response / thinking` tokens into the `Token usage` card, and adding a 7-category Context window breakdown (`Chat`, `Tools`, `System prompt`, `Subagents`, `Skills`, `Plugins`, `MCP tools`).
+- Redesign the in-place quota estimate enhancement inside Antigravity's native `View Usage` popup as a clean 2×2 bento card grid highlighting remaining equivalent USD budget, total capacity, estimated remaining tokens, and reset timers, paired with a bottom `Estimate & pricing` entry.
+- Unify UI motion physics across inline chips, cards, hover previews, and the full usage dashboard with a shared `cubic-bezier(0.22, 1, 0.36, 1)` curve, ClearType-safe `::before` capsule scaling, progressive Gaussian blur/shadow transitions, and distortion-free bidirectional morph animations.
+
 ## 0.9.3 — 2026-11-26
 
 - Add a one-shot native Windows toast notification in `compat/asar-keepalive.mjs` when Antigravity auto-updates are repaired (`repaired-restart-needed` / `staged-pending-exit`) so users immediately know a single restart restores the inline dashboard.

@@ -58,6 +58,19 @@ function utf8ByteLength(value) {
   return null;
 }
 
+function rawValueStringBytes(val) {
+  if (typeof val === 'string') return Buffer.byteLength(val, 'utf8');
+  if (Array.isArray(val)) return val.reduce((s, item) => s + rawValueStringBytes(item), 0);
+  if (val && typeof val === 'object') return Object.values(val).reduce((s, v) => s + rawValueStringBytes(v), 0);
+  return 0;
+}
+
+function plannerStreamBytes(pr) {
+  if (!pr || typeof pr !== 'object') return 0;
+  if (typeof pr.streamBytes === 'number' && Number.isFinite(pr.streamBytes) && pr.streamBytes >= 0) return pr.streamBytes;
+  return (utf8ByteLength(pr.thinking) || 0) + (utf8ByteLength(pr.response) || 0) + rawValueStringBytes(pr.toolCalls);
+}
+
 function isCompletedCheckpoint(step) {
   if (!/CHECKPOINT/i.test(String(step?.type || ''))) return false;
   const status = String(step?.status || '');
@@ -79,16 +92,25 @@ function checkpointSummaryTokens(step) {
   return null;
 }
 
-function systemBreakdownTokens(generators, lastChat) {
-  const breakdown = lastChat?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown
+function latestBreakdown(generators, lastChat) {
+  return lastChat?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown
     || [...generators].reverse().find(g => g?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown)
-      ?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown;
+      ?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown
+    || null;
+}
+
+function systemBreakdownGroups(generators, lastChat) {
+  const breakdown = latestBreakdown(generators, lastChat);
   const groups = breakdown?.groups;
   if (!Array.isArray(groups) || !groups.length) return null;
+  return groups.filter(group => group && typeof group === 'object' && String(group.type || '') !== 'TOKEN_TYPE_CHAT_MESSAGES');
+}
+
+function systemBreakdownTokens(generators, lastChat) {
+  const groups = systemBreakdownGroups(generators, lastChat);
+  if (!groups) return null;
   let sum = 0, found = false;
   for (const group of groups) {
-    if (!group || typeof group !== 'object') continue;
-    if (String(group.type || '') === 'TOKEN_TYPE_CHAT_MESSAGES') continue;
     const n = tokenCount(group.numTokens);
     if (n !== null) { sum += n; found = true; }
   }
@@ -98,7 +120,8 @@ function systemBreakdownTokens(generators, lastChat) {
 function latestContext(steps, generators, lastGen, lastChat) {
   const rawMeta = lastChat?.chatStartMetadata?.contextWindowMetadata;
   const model = lastChat?.modelDisplayName || lastChat?.responseModel || String(lastChat?.model || '');
-  const baseContext = contextMetrics(rawMeta, { model, sampledAt: lastChat?.chatStartMetadata?.createdAt });
+  const rawBreakdown = latestBreakdown(generators, lastChat);
+  const baseContext = contextMetrics(rawMeta, { model, sampledAt: lastChat?.chatStartMetadata?.createdAt, breakdown: rawBreakdown });
   if (!rawMeta || !Array.isArray(steps) || !steps.length) return baseContext;
 
   let cpIndex = -1;
@@ -129,15 +152,24 @@ function latestContext(steps, generators, lastGen, lastChat) {
   }
   if (!afterLastGen) return baseContext;
 
+  const sysGroups = systemBreakdownGroups(generators, lastChat);
   const sysTokens = systemBreakdownTokens(generators, lastChat);
   const summaryTokens = checkpointSummaryTokens(cpStep);
   if (sysTokens === null && summaryTokens === null) return null;
   const combined = (sysTokens ?? 0) + (summaryTokens ?? 0);
   const preUsed = tokenCount(rawMeta.estimatedTokensUsed);
   const usedTokens = preUsed !== null ? Math.min(preUsed, combined) : combined;
+  const compactGroups = [
+    ...(sysGroups || []),
+    ...(summaryTokens ? [{ type: 'TOKEN_TYPE_CHAT_MESSAGES', numTokens: summaryTokens }] : []),
+  ];
   return contextMetrics(
     { estimatedTokensUsed: usedTokens, maxContextTokens: rawMeta.maxContextTokens },
-    { model, sampledAt: cpStep?.metadata?.completedAt || cpStep?.metadata?.createdAt || lastChat?.chatStartMetadata?.createdAt },
+    {
+      model,
+      sampledAt: cpStep?.metadata?.completedAt || cpStep?.metadata?.createdAt || lastChat?.chatStartMetadata?.createdAt,
+      breakdown: compactGroups.length ? { totalTokens: usedTokens, groups: compactGroups } : null,
+    },
   );
 }
 
@@ -201,7 +233,24 @@ export function trajectoryMetrics(response) {
     const toolOnly = planners.length > 0 && planners.every(step=>step.plannerResponse?.toolCalls?.length > 0 &&
       !String(step.plannerResponse?.response || '').trim());
     const basis = visible !== null || thinking !== null ? 'response' : 'all-output';
-    const sample = { responseTokens, duration, ttft, reasons, toolOnly,
+    const totalOut = output ?? ((responseTokens ?? 0) + (thinking ?? 0));
+    let fullGenSeconds = null;
+    for (const p of planners) {
+      const vMs = Date.parse(p?.metadata?.viewableAt || '');
+      const fMs = Date.parse(p?.metadata?.finishedGeneratingAt || '');
+      if (Number.isFinite(vMs) && Number.isFinite(fMs) && fMs - vMs >= 250) {
+        fullGenSeconds = (fullGenSeconds ?? 0) + (fMs - vMs) / 1000;
+      }
+    }
+    if (fullGenSeconds !== null && duration !== null) fullGenSeconds = Math.max(fullGenSeconds, duration);
+    if (fullGenSeconds === null) {
+      if ((thinking ?? 0) > 0 && ttft !== null && ttft > 0) fullGenSeconds = ttft + (duration ?? 0);
+      else if (duration !== null && duration > 0) fullGenSeconds = duration;
+    }
+    const outputTps = totalOut !== null && totalOut > 0 && fullGenSeconds !== null && fullGenSeconds >= 0.25 && fullGenSeconds < 7200
+      ? totalOut / fullGenSeconds
+      : null;
+    const sample = { responseTokens, totalOut, fullGenSeconds, outputTps, duration, ttft, reasons, toolOnly,
       tps: responseTokens !== null && duration > 0 ? responseTokens / duration : null,
       model: chat.modelDisplayName || chat.responseModel || String(chat.model || usage.model || ''), basis,
       profile: JSON.stringify([usage.apiProvider || '',chat.responseModel || usage.model || chat.model || chat.modelDisplayName || '',basis]) };
@@ -218,7 +267,68 @@ export function trajectoryMetrics(response) {
   const sampledTokens = accepted.reduce((sum, s) => sum + s.responseTokens, 0);
   const basisSamples = accepted.length ? accepted : samples;
   const tools = steps.filter(s => /SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type || '')) || s.metadata?.toolCall);
-  const toolSeconds = unionSeconds(tools.map(s => [Date.parse(s.metadata.startedAt || s.metadata.createdAt), Date.parse(s.metadata.completedAt)]));
+  const completedToolIntervals = tools.map(s => [Date.parse(s.metadata?.startedAt || s.metadata?.createdAt), Date.parse(s.metadata?.completedAt)]);
+  const toolSeconds = unionSeconds(completedToolIntervals);
+  const isRunning = /RUNNING|EXECUTING|IN_PROGRESS/i.test(String(response.status || ''));
+  let activeToolStartedAt = null, activeModelStartedAt = null, liveStream = null;
+  if (isRunning) {
+    const maxCompletedToolEnd = completedToolIntervals.reduce((max, [, end]) => Number.isFinite(end) ? Math.max(max, end) : max, 0);
+    const activeToolStarts = tools
+      .filter(s => !Number.isFinite(Date.parse(s.metadata?.completedAt || '')))
+      .map(s => Date.parse(s.metadata?.startedAt || s.metadata?.createdAt || ''))
+      .filter(Number.isFinite);
+    if (activeToolStarts.length) {
+      const startMs = Math.max(Math.min(...activeToolStarts), maxCompletedToolEnd);
+      activeToolStartedAt = new Date(startMs).toISOString();
+    } else {
+      let lastGenStep = -1;
+      for (const g of generators) {
+        if (!g?.chatModel?.usage) continue;
+        for (const idx of g.stepIndices || []) {
+          if (Number.isInteger(idx) && idx > lastGenStep) lastGenStep = idx;
+        }
+      }
+      let modelStartMs = NaN;
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const s = steps[i];
+        if (/PLANNER_RESPONSE/.test(String(s?.type || ''))) {
+          if (i > lastGenStep) {
+            const ts = Date.parse(s.metadata?.startedAt || s.metadata?.createdAt || '');
+            if (Number.isFinite(ts)) modelStartMs = ts;
+            if (/RUNNING|IN_PROGRESS/i.test(String(s?.status || ''))) {
+              const bytes = plannerStreamBytes(s.plannerResponse);
+              const streamStart = s.metadata?.viewableAt || s.metadata?.createdAt || null;
+              liveStream = {
+                stepIndex: i,
+                startedAt: streamStart && Number.isFinite(Date.parse(streamStart)) ? new Date(streamStart).toISOString() : null,
+                bytes,
+                hasFirstToken: Boolean(s.metadata?.viewableAt || bytes > 0),
+              };
+            }
+          }
+          break;
+        }
+      }
+      if (!Number.isFinite(modelStartMs)) {
+        for (let i = steps.length - 1; i >= 0; i--) {
+          const s = steps[i];
+          const ts = Date.parse(s?.metadata?.completedAt || s?.metadata?.startedAt || s?.metadata?.createdAt || '');
+          if (Number.isFinite(ts)) { modelStartMs = ts; break; }
+        }
+      }
+      if (Number.isFinite(modelStartMs)) activeModelStartedAt = new Date(modelStartMs).toISOString();
+    }
+  }
+  const outputSamples = samples.filter(s => typeof s.outputTps === 'number' && Number.isFinite(s.outputTps) && s.outputTps > 0 && s.outputTps < 2000 && !s.reasons.includes('duplicate-scope') && !s.reasons.includes('retry-scope') && !s.reasons.includes('token-scope'));
+  const totalGenSeconds = outputSamples.reduce((sum, s) => sum + s.fullGenSeconds, 0);
+  const totalGenTokens = outputSamples.reduce((sum, s) => sum + s.totalOut, 0);
+  const outputTps = totalGenSeconds > 0 ? totalGenTokens / totalGenSeconds : null;
+  const latestOutputSample = outputSamples.at(-1) || null;
+  const latestOutputTps = latestOutputSample ? latestOutputSample.outputTps : null;
+  const tpsHistory = (outputSamples.length ? outputSamples : accepted).slice(-30).map(s => ({
+    tps: Math.round((s.outputTps ?? s.tps) * 100) / 100,
+    duration: Math.round((s.fullGenSeconds ?? s.duration) * 100) / 100,
+  }));
   const latest = samples.at(-1) || null;
   const lastGen = [...generators].reverse().find(g => g.chatModel) || null;
   const lastChat = lastGen?.chatModel;
@@ -229,9 +339,13 @@ export function trajectoryMetrics(response) {
     requests: ids.size, measuredRequests: accepted.length, missingTiming, excludedTiming, rateWarnings, timingReasons, rateVersion: RATE_VERSION, counts,
     cache:{...cache,totalTokens:cache.inputTokens+cache.outputTokens,hitRate:cache.inputTokens>0?cache.cachedTokens/cache.inputTokens:null,complete:cache.missingRequests===0},
     tps: streamingSeconds > 0 ? sampledTokens / streamingSeconds : null, latestTps: latest?.status === 'ok' ? latest.tps : null,
+    outputTps, latestOutputTps,
     latestRateStatus: latest?.status ?? 'missing',
     rateBasis: basisSamples.length && basisSamples.every(s => s.basis === 'response') ? 'response' : 'all-output',
     streamingSeconds, modelSeconds, toolSeconds, ttftSeconds: ttftSamples ? ttftSeconds / ttftSamples : null,
+    liveTiming: { isRunning, activeModelStartedAt, activeToolStartedAt },
+    liveStream,
+    tpsHistory,
     latestShortSample: latest?.status === 'ok' && latest.duration < 1, model: latest?.model || null,
     context: latestContext(steps, generators, lastGen, lastChat),
     complete: Number(response.numTotalGeneratorMetadata ?? generators.length) === generators.length,

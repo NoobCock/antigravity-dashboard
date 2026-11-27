@@ -65,7 +65,8 @@ export class MetricsStore {
     const scope = this.identity, epoch = this.epoch;
     let entry = this.sessions.get(id);
     if (entry?.pending) return entry.pending;
-    if (!force && entry?.data && Date.now() - entry.updatedAt < 1800) return entry.data;
+    const cacheTtlMs = entry?.data?.liveTiming?.isRunning ? 450 : 1800;
+    if (!force && entry?.data && Date.now() - entry.updatedAt < cacheTtlMs) return entry.data;
     entry ||= {};
     this.sessions.set(id, entry);
     const current = () => scope === this.identity && epoch === this.epoch && this.sessions.get(id) === entry;

@@ -58,3 +58,41 @@ test('RPC errors do not replace a cached quota with made-up percentages', async 
   const store = new MetricsStore(client);store.quota=[{id:'saved'}];store.quotaAt=1000;
   const snapshot = await store.snapshot();assert.equal(snapshot.connection,'stale');assert.equal(snapshot.groups[0].id,'saved');assert.equal(snapshot.speed,null);
 });
+test('liveTiming tracks active tool and active model starts without double-counting completed intervals, and returns tpsHistory', () => {
+  const runningTool = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_RUN_COMMAND', metadata: { startedAt: '2026-11-27T11:45:00Z', completedAt: '2026-11-27T11:45:05Z' } },
+        { type: 'CORTEX_STEP_TYPE_GENERIC', metadata: { startedAt: '2026-11-27T11:45:03Z', toolCall: true } },
+      ],
+      generatorMetadata: [chat('a', 100, '2s'), chat('b', 300, '3s')],
+    },
+  });
+  assert.equal(runningTool.liveTiming.isRunning, true);
+  assert.equal(runningTool.liveTiming.activeToolStartedAt, '2026-11-27T11:45:05.000Z');
+  assert.equal(runningTool.liveTiming.activeModelStartedAt, null);
+  assert.deepEqual(runningTool.tpsHistory, [{ tps: 50, duration: 4 }, { tps: 80, duration: 5 }]);
+
+  const runningModel = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+        { type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', metadata: { createdAt: '2026-11-27T11:46:00Z' } },
+      ],
+      generatorMetadata: [],
+    },
+  });
+  assert.equal(runningModel.liveTiming.isRunning, true);
+  assert.equal(runningModel.liveTiming.activeToolStartedAt, null);
+  assert.equal(runningModel.liveTiming.activeModelStartedAt, '2026-11-27T11:46:00.000Z');
+
+  const idle = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_IDLE',
+    trajectory: { steps: [{ type: 'CORTEX_STEP_TYPE_GENERIC', metadata: { startedAt: '2026-11-27T11:45:03Z', toolCall: true } }], generatorMetadata: [] },
+  });
+  assert.equal(idle.liveTiming.isRunning, false);
+  assert.equal(idle.liveTiming.activeToolStartedAt, null);
+  assert.equal(idle.liveTiming.activeModelStartedAt, null);
+});

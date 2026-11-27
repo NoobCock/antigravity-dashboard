@@ -37,10 +37,8 @@ try{
    assert.equal(await strip.getAttribute('data-scope'),'subagent');assert.equal(await strip.getAttribute('data-layout'),'ready');
    assert.equal(await strip.locator('#context-percent').textContent(),'12%');assert.equal(await strip.locator('#cache-rate').textContent(),'60.0%');
    assert.equal(await strip.evaluate(e=>e.parentElement.closest('[data-testid=agent-input-box]')!==null),true);
-   await strip.locator('[data-card=context]').hover();await strip.locator('#context-card').waitFor({state:'visible'});
+   await strip.locator('[data-card=context]').click();await strip.locator('#context-card').waitFor({state:'visible'});
    assert.match(await strip.locator('#context-card .scope-note').textContent(),lang==='en'?/Subagent/i:/子代理/);
-   assert.match(await strip.locator('#five-note').textContent(),lang==='en'?/account quota/i:/账号共享额度/);
-   assert.ok((await strip.locator('.group-trigger').textContent()).includes('Claude / GPT'),'Quota group comes from child sampled model');
    await page.keyboard.press('Escape');
    for(const width of [700,500,370,1100]){
     await page.setViewportSize({width,height:800});await page.waitForTimeout(100);

@@ -12,9 +12,10 @@ const chatModelNode={usage,model:scalar,modelDisplayName:scalar,responseModel:sc
    tokenBreakdown:{totalTokens:scalar,groups:{'*':breakdownGroup}}}}};
 const generators={'*':{stepIndices:{'*':scalar},chatModel:chatModelNode}};
 const TOOL_STEP_RE=/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i;
-const stepNode={type:scalar,status:scalar,metadata:{createdAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence,modelUsage:stepUsage},
+const plannerNode={thinking:length,response:nonempty,toolCalls:calls};
+const stepNode={type:scalar,status:scalar,metadata:{createdAt:scalar,viewableAt:scalar,finishedGeneratingAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence,modelUsage:stepUsage},
  checkpoint:{checkpointIndex:scalar,includedStepIndexStart:scalar,includedStepIndexEnd:scalar,sessionSummary:length},
- plannerResponse:{response:nonempty,toolCalls:calls}};
+ plannerResponse:plannerNode};
 const steps={'*':stepNode};
 const schema={trajectory:{cascadeId:scalar,trajectoryId:scalar,steps,generatorMetadata:generators},steps,
  generatorMetadata:generators,generatorMetadatas:generators,status:scalar,numTotalSteps:scalar,numTotalGeneratorMetadata:scalar};
@@ -40,6 +41,7 @@ export class TrajectoryJson {
  charge(n){if((this.retained+=n)>this.maxRetainedBytes)throw new Error('会话统计数据超过采集上限');}
  node(){const f=this.stack.at(-1);if(!f)return schema;const key=f.array?'*':f.key;return f.node&&typeof f.node==='object'&&Object.hasOwn(f.node,key)?f.node[key]:undefined;}
  valueAllowed(){const f=this.stack.at(-1);return f?['value','valueOrEnd'].includes(f.expect):!this.done;}
+ inCallsSubtree(){for(let i=this.stack.length-1;i>=0;i--){if(this.stack[i].node===calls)return this.stack[i];if(this.stack[i].node===stepNode)return null;}return null;}
  finishValue(value){
   const f=this.stack.at(-1);
   if(!f){if(this.done)this.fail();this.result=value;this.done=true;return;}
@@ -52,21 +54,36 @@ export class TrajectoryJson {
   if(c==='{'||c==='['){
    if(!this.valueAllowed()||this.stack.length>=64)this.fail();const node=this.node(),array=c==='[';
    const out=typeof node==='object'?(array?[]:{}):null;if(out)this.charge(64);
-   this.stack.push({node,array,out,count:0,key:null,expect:array?'valueOrEnd':'keyOrEnd'});return;
+   this.stack.push({node,array,out,count:0,streamBytes:0,key:null,expect:array?'valueOrEnd':'keyOrEnd'});return;
   }
   if(c==='}'||c===']'){
    if(!f||f.array!==(c===']')||!['commaOrEnd',f.array?'valueOrEnd':'keyOrEnd'].includes(f.expect))this.fail();
    this.stack.pop();
+   if(f.node===calls){
+    const parent=this.stack.at(-1);
+    if(parent?.node===plannerNode)parent.streamBytes+=f.streamBytes;
+   }
+   if(f.node===plannerNode&&f.out){
+    const thinkingBytes=typeof f.out.thinking==='number'?f.out.thinking:0;
+    delete f.out.thinking;
+    f.out._streamBytes=thinkingBytes+f.streamBytes;
+   }
    if(f.node===stepNode&&f.out){
     const typeStr=String(f.out.type||'');
     const isCheckpoint=/CHECKPOINT/i.test(typeStr);
+    const isPlanner=/PLANNER_RESPONSE/.test(typeStr);
+    const isRunningPlanner=isPlanner&&/RUNNING|IN_PROGRESS/i.test(String(f.out.status||''));
+    if(f.out.plannerResponse&&typeof f.out.plannerResponse==='object'){
+     const sb=f.out.plannerResponse._streamBytes||0;
+     delete f.out.plannerResponse._streamBytes;
+     if(isRunningPlanner)f.out.plannerResponse.streamBytes=sb;
+    }
     if(!isCheckpoint){
-     if(Object.hasOwn(f.out,'status')){this.retained=Math.max(0,this.retained-retainedSize(f.out.status));delete f.out.status;}
+     if(!isRunningPlanner&&Object.hasOwn(f.out,'status')){this.retained=Math.max(0,this.retained-retainedSize(f.out.status));delete f.out.status;}
      if(Object.hasOwn(f.out,'checkpoint')){this.retained=Math.max(0,this.retained-retainedSize(f.out.checkpoint));delete f.out.checkpoint;}
      const meta=f.out.metadata;
      if(meta&&typeof meta==='object'){
       if(Object.hasOwn(meta,'modelUsage')){this.retained=Math.max(0,this.retained-retainedSize(meta.modelUsage));delete meta.modelUsage;}
-      const isPlanner=/PLANNER_RESPONSE/.test(typeStr);
       const isTool=TOOL_STEP_RE.test(typeStr)||Boolean(meta.toolCall);
       if(!isPlanner&&!isTool){
        this.retained=Math.max(0,this.retained-retainedSize(meta));delete f.out.metadata;
@@ -74,6 +91,10 @@ export class TrajectoryJson {
        if(isPlanner&&!isTool){
         if(Object.hasOwn(meta,'startedAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.startedAt));delete meta.startedAt;}
         if(Object.hasOwn(meta,'completedAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.completedAt));delete meta.completedAt;}
+       }
+       if(!isPlanner){
+        if(Object.hasOwn(meta,'viewableAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.viewableAt));delete meta.viewableAt;}
+        if(Object.hasOwn(meta,'finishedGeneratingAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.finishedGeneratingAt));delete meta.finishedGeneratingAt;}
        }
        if(isTool&&!isPlanner&&meta.startedAt&&Object.hasOwn(meta,'createdAt')){
         this.retained=Math.max(0,this.retained-retainedSize(meta.createdAt));delete meta.createdAt;
@@ -100,11 +121,12 @@ export class TrajectoryJson {
   const f=this.stack.at(-1),key=f&&!f.array&&['key','keyOrEnd'].includes(f.expect);
   if(!key&&!this.valueAllowed())this.fail();
   const node=key?null:this.node();
-  this.token={kind:'string',key,node,buffer:'',byteLength:0,highSurrogate:false,overflow:false,escape:0,hex:'',any:false};
+  const callsFrame=!key?this.inCallsSubtree():null;
+  this.token={kind:'string',key,node,callsFrame,buffer:'',byteLength:0,highSurrogate:false,overflow:false,escape:0,hex:'',any:false};
  }
  stringPart(text){
   const t=this.token;if(t.node===nonempty&&/\S/u.test(text)||t.node===presence&&text.length)t.any=true;
-  if(t.node===length){addUtf8Bytes(t,text);return;}
+  if(t.node===length||t.node===nonempty||t.callsFrame){addUtf8Bytes(t,text);if(t.node===length||t.callsFrame&&!t.node)return;}
   if(t.key||t.node===scalar||typeof t.node==='object'){
    if(t.overflow)return;t.buffer+=text;
    if(t.buffer.length>(t.key?1024:16384)){if(!t.key)throw new Error('会话统计字段超过采集上限');t.buffer='';t.overflow=true;}
@@ -113,10 +135,16 @@ export class TrajectoryJson {
  endString(){
   const t=this.token;this.token=null;
   if(t.key){const f=this.stack.at(-1);f.key=t.overflow?null:t.buffer;f.expect='colon';return;}
+  const bytes=t.byteLength+(t.highSurrogate?3:0);
+  if(t.callsFrame)t.callsFrame.streamBytes+=bytes;
+  if(t.node===nonempty){
+   const top=this.stack.at(-1);
+   if(top?.node===plannerNode)top.streamBytes+=bytes;
+  }
   let value=DROP;
   if(t.node===nonempty)value=t.any?'1':'';
   else if(t.node===presence)value=t.any;
-  else if(t.node===length)value=t.byteLength+(t.highSurrogate?3:0);
+  else if(t.node===length)value=bytes;
   else if(t.node===scalar||typeof t.node==='object'){value=t.buffer;this.charge(value.length*2);}
   this.finishValue(value);
  }

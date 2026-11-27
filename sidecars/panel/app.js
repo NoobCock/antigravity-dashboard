@@ -22,6 +22,12 @@ let pending = false, timer = null, serverOffset = 0, lastExpiredRefresh = 0;
 let selectedCard='speed',cardMotion=null;
 let refreshRequest=null,manualRequest=null;
 let usageDashboard=null,usageGuideDismissed=false;
+const SAMPLE_OPTIONS=[500,1000,2000,5000];
+let sampleIntervalMs=SAMPLE_OPTIONS.includes(Number(localGet('ag-pulse-tps-interval')))?Number(localGet('ag-pulse-tps-interval')):1000;
+let tpsSeries=[],tpsSeriesConvo=null,tpsChartHoverIdx=null,sampleTimer=null;
+let streamState={stepIdx:-1,prevBytes:0,prevAt:0,liveTps:null,lastCompletedReqs:-1};
+const CTX_COLORS={chat:'#3b82f6',tools:'#f59e0b',system:'#8b5cf6',subagents:'#10b981',skills:'#ec4899',plugins:'#06b6d4',mcp:'#f97316',other:'#94a3b8'};
+const CTX_LABELS={chat:'ctxChat',tools:'ctxTools',system:'ctxSystem',subagents:'ctxSubagents',skills:'ctxSkills',plugins:'ctxPlugins',mcp:'ctxMcp',other:'ctxOther'};
 const host = window.sidecar;
 if (!host) document.body.classList.add('standalone');
 const preferenceRequest=async(input)=>{
@@ -39,7 +45,7 @@ function showCard(name,animate=false) {
   cardMotion?.cancel();cardMotion=null;
   for (const chip of chips){const selected=chip.dataset.card===name;chip.setAttribute('aria-selected',String(selected));chip.tabIndex=selected?0:-1;}
   for (const nameKey of ['speed','cache','context']) $(`${nameKey}-card`).hidden = name !== nameKey;
-  if(changed&&animate&&!matchMedia('(prefers-reduced-motion: reduce)').matches)cardMotion=$(`${name}-card`).animate([{opacity:.6,transform:'translateY(4px)'},{opacity:1,transform:'translateY(0)'}],{duration:160,easing:'cubic-bezier(.23,1,.32,1)'});
+  if(changed&&animate&&!matchMedia('(prefers-reduced-motion: reduce)').matches)cardMotion=$(`${name}-card`).animate([{opacity:.5,transform:'translateY(5px) scale(.985)'},{opacity:1,transform:'translateY(0) scale(1)'}],{duration:200,easing:'cubic-bezier(.16,1,.3,1)'});
 }
 for (const chip of chips) {
   chip.addEventListener('click', event => showCard(chip.dataset.card,event.detail>0));
@@ -103,6 +109,179 @@ function renderQuota(window, prefix) {
   $(`${prefix}-note`).textContent = !bucket?.available ? t('noQuota') : bucket.disabled ? t('disabledQuota') : remaining === null ? t('noFraction') : '';
 }
 
+function updateLiveTiming() {
+  const speed = snapshot?.speed, lt = speed?.liveTiming, running = Boolean(lt?.isRunning);
+  const calc = (base, startedAt) => {
+    const startMs = startedAt ? Date.parse(startedAt) : NaN;
+    const active = Number.isFinite(startMs);
+    const extra = active ? Math.max(0, (Date.now() + serverOffset - startMs) / 1000) : 0;
+    const total = typeof base === 'number' && Number.isFinite(base) ? base + extra : (active ? extra : null);
+    return { total, active };
+  };
+  const m = calc(speed?.modelSeconds, running ? lt?.activeModelStartedAt : null);
+  const tl = calc(speed?.toolSeconds, running ? lt?.activeToolStartedAt : null);
+  $('model-time').textContent = language.elapsed(m.total);
+  $('tool-time').textContent = language.elapsed(tl.total);
+  $('model-time-cell')?.classList.toggle('live-active', m.active);
+  $('tool-time-cell')?.classList.toggle('live-active', tl.active);
+}
+const effectiveAvgTps = speed => typeof speed?.outputTps === 'number' && Number.isFinite(speed.outputTps) ? speed.outputTps : (typeof speed?.tps === 'number' && Number.isFinite(speed.tps) ? speed.tps : null);
+const effectiveLatestTps = speed => typeof speed?.latestOutputTps === 'number' && Number.isFinite(speed.latestOutputTps) ? speed.latestOutputTps : (typeof speed?.latestTps === 'number' && Number.isFinite(speed.latestTps) ? speed.latestTps : null);
+const isModelGenerating = speed => Boolean(speed?.liveTiming?.isRunning && speed?.liveTiming?.activeModelStartedAt && !speed?.liveTiming?.activeToolStartedAt);
+
+function seedTpsSeries(speed) {
+  if (!speed) return;
+  const cid = speed.conversationId || '';
+  if (tpsSeriesConvo !== cid) {
+    tpsSeriesConvo = cid;
+    streamState = { stepIdx: -1, prevBytes: 0, prevAt: 0, liveTps: null, lastCompletedReqs: typeof speed.requests === 'number' ? speed.requests : 0 };
+    const hist = (speed.tpsHistory || []).map(p => p?.tps).filter(n => typeof n === 'number' && Number.isFinite(n) && n > 0);
+    if (hist.length) tpsSeries = hist.slice(-24);
+    else {
+      const init = effectiveLatestTps(speed) ?? effectiveAvgTps(speed);
+      tpsSeries = init !== null ? [init] : [];
+    }
+  } else if (!tpsSeries.length) {
+    const init = effectiveLatestTps(speed) ?? effectiveAvgTps(speed);
+    if (init !== null) tpsSeries = [init];
+  }
+}
+function syncCompletedTpsSample(speed) {
+  if (!speed) return;
+  seedTpsSeries(speed);
+  const reqs = typeof speed.requests === 'number' ? speed.requests : 0;
+  if (streamState.lastCompletedReqs < 0) { streamState.lastCompletedReqs = reqs; return; }
+  if (reqs > streamState.lastCompletedReqs) {
+    streamState.lastCompletedReqs = reqs;
+    streamState.liveTps = null;
+    streamState.stepIdx = -1;
+    const val = effectiveLatestTps(speed);
+    if (val !== null) { tpsSeries.push(Math.round(val * 10) / 10); if (tpsSeries.length > 40) tpsSeries.shift(); }
+  }
+}
+function sampleLiveStreamingTps() {
+  const speed = snapshot?.speed;
+  if (!speed || !isModelGenerating(speed)) {
+    streamState.liveTps = null;
+    streamState.stepIdx = -1;
+    return;
+  }
+  const now = Date.now(), ls = speed.liveStream;
+  const stepIdx = ls?.stepIndex ?? (speed.steps || 0);
+  const bytes = typeof ls?.bytes === 'number' ? ls.bytes : 0;
+  if (streamState.stepIdx !== stepIdx) {
+    streamState.stepIdx = stepIdx; streamState.prevBytes = bytes; streamState.prevAt = now;
+    const startMs = ls?.startedAt ? Date.parse(ls.startedAt) : NaN;
+    if (bytes > 0 && Number.isFinite(startMs) && now + serverOffset - startMs >= 250) {
+      streamState.liveTps = (bytes / 3.7) / ((now + serverOffset - startMs) / 1000);
+      tpsSeries.push(Math.round(streamState.liveTps * 10) / 10); if (tpsSeries.length > 40) tpsSeries.shift();
+    }
+    return;
+  }
+  const dt = (now - streamState.prevAt) / 1000;
+  if (dt < 0.2) return;
+  const dBytes = Math.max(0, bytes - streamState.prevBytes);
+  streamState.prevBytes = bytes; streamState.prevAt = now;
+  if (dBytes > 0) {
+    const inst = (dBytes / 3.7) / dt;
+    streamState.liveTps = streamState.liveTps !== null ? streamState.liveTps * 0.35 + inst * 0.65 : inst;
+    tpsSeries.push(Math.round(streamState.liveTps * 10) / 10); if (tpsSeries.length > 40) tpsSeries.shift();
+  }
+}
+function renderTpsChart() {
+  const svgEl = $('tps-chart-svg'), emptyEl = $('tps-chart-empty');
+  if (!svgEl || !emptyEl) return;
+  const speed = snapshot?.speed;
+  const avg = effectiveAvgTps(speed);
+  const pts = tpsSeries;
+  if (!pts.length) {
+    emptyEl.hidden = false;
+    svgEl.innerHTML = '';
+    $('tps-chart-peak').textContent = '—';
+    $('tps-chart-avg-label').textContent = avg !== null ? `${t('tpsAvg')} ${rate(avg)}` : '—';
+    $('tps-chart-hover').textContent = '';
+    return;
+  }
+  emptyEl.hidden = true;
+  const W = 288, H = 84, padT = 8, padB = 8, padL = 2, padR = 4;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const allVals = avg !== null ? [...pts, avg] : pts;
+  const maxV = Math.max(10, Math.ceil(Math.max(...allVals, 1) * 1.18 / 5) * 5);
+  const xAt = i => pts.length === 1 ? padL + plotW : padL + (i / (pts.length - 1)) * plotW;
+  const yAt = v => padT + plotH - (Math.max(0, Math.min(maxV, v)) / maxV) * plotH;
+  const coords = pts.map((v, i) => [xAt(i), yAt(v)]);
+  const linePts = coords.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+  const areaPts = coords.length === 1
+    ? `${padL},${padT + plotH} ${padL},${coords[0][1].toFixed(1)} ${coords[0][0].toFixed(1)},${coords[0][1].toFixed(1)} ${coords[0][0].toFixed(1)},${padT + plotH}`
+    : `${coords[0][0].toFixed(1)},${padT + plotH} ${linePts} ${coords.at(-1)[0].toFixed(1)},${padT + plotH}`;
+  const midY = (padT + plotH / 2).toFixed(1);
+  const avgY = avg !== null ? yAt(avg).toFixed(1) : null;
+  const last = coords.at(-1);
+  const hoverIdx = tpsChartHoverIdx !== null && tpsChartHoverIdx >= 0 && tpsChartHoverIdx < pts.length ? tpsChartHoverIdx : null;
+  const hoverPt = hoverIdx !== null ? coords[hoverIdx] : null;
+  $('tps-chart-peak').textContent = `${t('tpsPeak')} ${rate(Math.max(...pts))}`;
+  $('tps-chart-avg-label').textContent = avg !== null ? `${t('tpsAvg')} ${rate(avg)}` : '—';
+  $('tps-chart-hover').textContent = hoverIdx !== null ? `${rate(pts[hoverIdx])} tok/s` : '';
+  svgEl.innerHTML = `<defs><linearGradient id="ag-panel-tps-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--pulse-accent)" stop-opacity="0.28"/><stop offset="100%" stop-color="var(--pulse-accent)" stop-opacity="0.02"/></linearGradient></defs>`
+    + `<line x1="${padL}" y1="${padT}" x2="${W - padR}" y2="${padT}" stroke="var(--pulse-separator)" stroke-width="0.8"/>`
+    + `<line x1="${padL}" y1="${midY}" x2="${W - padR}" y2="${midY}" stroke="var(--pulse-separator)" stroke-width="0.8" stroke-dasharray="2 3"/>`
+    + `<line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="var(--pulse-separator)" stroke-width="0.8"/>`
+    + `<polygon points="${areaPts}" fill="url(#ag-panel-tps-grad)"/>`
+    + (avgY !== null ? `<line x1="${padL}" y1="${avgY}" x2="${W - padR}" y2="${avgY}" stroke="var(--pulse-muted)" stroke-width="1" stroke-dasharray="3 3" opacity="0.75"/>` : '')
+    + (coords.length === 1
+      ? `<line x1="${padL}" y1="${last[1].toFixed(1)}" x2="${last[0].toFixed(1)}" y2="${last[1].toFixed(1)}" stroke="var(--pulse-accent)" stroke-width="1.8" stroke-linecap="round"/>`
+      : `<polyline points="${linePts}" fill="none" stroke="var(--pulse-accent)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`)
+    + (hoverPt ? `<line x1="${hoverPt[0].toFixed(1)}" y1="${padT}" x2="${hoverPt[0].toFixed(1)}" y2="${padT + plotH}" stroke="var(--pulse-muted)" stroke-width="1" stroke-dasharray="2 2"/><circle cx="${hoverPt[0].toFixed(1)}" cy="${hoverPt[1].toFixed(1)}" r="3.4" fill="var(--pulse-accent)" stroke="var(--pulse-card)" stroke-width="1.4"/>` : '')
+    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="${speed?.liveTiming?.isRunning ? '3.2' : '2.5'}" fill="var(--pulse-accent)" stroke="var(--pulse-card)" stroke-width="1.2"/>`;
+}
+function restartSampleTimer() {
+  clearInterval(sampleTimer);
+  sampleTimer = setInterval(() => {
+    if (snapshot?.speed && isModelGenerating(snapshot.speed)) {
+      sampleLiveStreamingTps();
+      if (selectedCard === 'speed') renderTpsChart();
+    }
+  }, sampleIntervalMs);
+}
+function renderContextBreakdown(context) {
+  const track = $('context-track'), list = $('context-breakdown');
+  const hasCapacity = typeof context?.usedFraction === 'number';
+  const items = context?.breakdown?.items;
+  if (track) {
+    if (items?.length) {
+      const denom = context.maxTokens && context.maxTokens > 0 ? context.maxTokens : (context.breakdown.totalTokens || context.usedTokens || 1);
+      const scale = denom > 0 && context.usedTokens > denom ? denom / context.usedTokens : 1;
+      track.innerHTML = items.map(item => {
+        const w = Math.max(0.8, Math.min(100, (item.tokens / denom) * 100 * scale));
+        return `<i style="width:${w.toFixed(2)}%;background:${CTX_COLORS[item.key] || CTX_COLORS.other}" title="${t(CTX_LABELS[item.key] || 'ctxOther')}: ${count(item.tokens)}"></i>`;
+      }).join('');
+    } else {
+      const fill = $('context-fill') || (() => { const i = document.createElement('i'); i.id = 'context-fill'; track.replaceChildren(i); return i; })();
+      fill.style.width = hasCapacity ? `${Math.min(1, context.usedFraction) * 100}%` : '0%';
+      fill.style.background = hasCapacity && context.usedFraction >= .9 ? 'var(--pulse-danger)' : 'var(--pulse-accent)';
+    }
+  }
+  if (!list) return;
+  if (!items?.length) { list.hidden = true; list.replaceChildren(); return; }
+  list.hidden = false;
+  const denom = context.maxTokens && context.maxTokens > 0 ? context.maxTokens : (context.breakdown.totalTokens || context.usedTokens || 1);
+  list.replaceChildren(...items.map(item => {
+    const col = CTX_COLORS[item.key] || CTX_COLORS.other;
+    const name = t(CTX_LABELS[item.key] || 'ctxOther');
+    const pctVal = denom > 0 ? (item.tokens / denom) * 100 : 0;
+    const pctStr = pctVal >= 10 ? `${Math.round(pctVal)}%` : pctVal >= 0.1 ? `${pctVal.toFixed(1)}%` : '<0.1%';
+    const rowEl = document.createElement('div');
+    rowEl.className = 'ctx-row';
+    rowEl.title = `${name}: ${count(item.tokens)}`;
+    const sw = document.createElement('span'); sw.className = 'ctx-swatch'; sw.style.background = col;
+    const nm = document.createElement('span'); nm.className = 'ctx-name'; nm.textContent = name;
+    const tk = document.createElement('span'); tk.className = 'ctx-tok'; tk.textContent = compact(item.tokens);
+    const pc = document.createElement('span'); pc.className = 'ctx-pct'; pc.textContent = pctStr;
+    rowEl.append(sw, nm, tk, pc);
+    return rowEl;
+  }));
+}
+
 function render() {
   if (!snapshot) return;
   if(usageDashboard){
@@ -124,21 +303,25 @@ function render() {
   if (group) select.value = group.id;
   for (const element of document.querySelectorAll('.group-name')) element.textContent = group ? groupLabel(group) : '—';
   renderQuota('5h','five'); renderQuota('weekly','week');
-  $('strip-tps').textContent = rate(speed?.tps);
-  $('speed-tab').title=rate(speed?.tps)+' tok/s';
-  $('session-tps').textContent = rate(speed?.tps);
-  $('latest-tps').textContent = speed?.latestRateStatus==='unreliable'?t('timingUnreliable'):speed?.latestRateStatus==='legacy'?t('ratePending'):rate(speed?.latestTps);
-  $('request-count').textContent = t('sampleCount',{n:speed?.measuredRequests??0});
+  const avgVal = effectiveAvgTps(speed), latestVal = effectiveLatestTps(speed);
+  const liveVal = isModelGenerating(speed) && typeof streamState.liveTps === 'number' ? streamState.liveTps : null;
+  $('strip-tps').textContent = rate(liveVal !== null && liveVal > 0 ? liveVal : avgVal);
+  $('speed-tab').title=rate(avgVal)+' tok/s';
   $('session-steps').textContent = speed ? t('rounds',{rounds:speed.rounds,steps:speed.steps}) : '';
   $('strip-model').textContent = speed?.model || t('waitingRequest');
   $('strip-model').title=$('strip-model').textContent;
-  $('model-time').textContent = language.elapsed(speed?.modelSeconds);
-  $('tool-time').textContent = language.elapsed(speed?.toolSeconds);
   $('ttft').textContent = language.elapsed(speed?.ttftSeconds);
-  $('token-detail').textContent = speed ? `${count(speed.counts.responseOutput)} / ${count(speed.counts.thinkingOutput)} tok` : '—';
+  const lastTpsStr = liveVal !== null ? rate(liveVal) : typeof latestVal === 'number' ? rate(latestVal) : speed?.latestRateStatus==='unreliable'?t('timingUnreliable'):speed?.latestRateStatus==='legacy'?t('ratePending'):rate(latestVal);
+  const avgTpsStr = speed?.latestRateStatus==='legacy'?t('ratePending'):rate(avgVal);
+  if ($('tps-last-avg')) $('tps-last-avg').textContent = `${lastTpsStr} / ${avgTpsStr}`;
+  $('token-detail').textContent = speed ? `${count(speed.counts.responseOutput)} / ${count(speed.counts.thinkingOutput)}` : '—';
+  syncCompletedTpsSample(speed);
+  if (isModelGenerating(speed)) sampleLiveStreamingTps();
+  renderTpsChart();
+  updateLiveTiming();
   const savedNote=speed?.restoredFromHistory?' '+t('savedStats',{time:speed.savedAt?language.resetDate(speed.savedAt):'—'}):'';
   const saveWarning=snapshot.persistenceError?' '+t('saveFailed'):'';
-  $('speed-basis').textContent = language.rateNote(speed)+savedNote+saveWarning;
+  $('speed-basis').textContent = (speed?.counts?.thinkingOutput > 0 ? t('allBasis') : language.rateNote(speed))+savedNote+saveWarning;
   const cache=speed?.cache;
   const context=speed?.context,hasCapacity=typeof context?.usedFraction==='number';
   $('strip-context').textContent=hasCapacity?`${Math.round(context.usedFraction*100)}%`:'—';
@@ -149,14 +332,13 @@ function render() {
   $('context-model').textContent=context?.model||'—';
   const restored=context&&(speed.contextRestored===true||speed.restoredFromHistory&&speed.contextRestored!==false);
   $('context-note').textContent=[context?t('contextBasis'):t('contextUnavailable'),restored?t('contextSaved',{time:speed.savedAt?language.resetDate(speed.savedAt):'—'}):'',hasCapacity&&context.usedFraction>1?t('contextExceeded'):''].filter(Boolean).join(' ');
-  $('context-fill').style.width=hasCapacity?`${Math.min(1,context.usedFraction)*100}%`:'0%';
-  $('context-fill').style.background=hasCapacity&&context.usedFraction>=.9?'var(--pulse-danger)':'';
+  renderContextBreakdown(context);
   if(hasCapacity){$('context-track').setAttribute('aria-valuenow',String(Math.min(100,context.usedFraction*100)));$('context-track').setAttribute('aria-valuemin','0');$('context-track').setAttribute('aria-valuemax','100');}else $('context-track').removeAttribute('aria-valuenow');
   $('strip-cache').textContent=percent(cache?.hitRate);$('cache-rate').textContent=percent(cache?.hitRate);
-  $('strip-cache-total').textContent=cache?.measuredRequests?`${compact(cache.totalTokens)} tok`:'— tok';
-  $('cache-tab').title=percent(cache?.hitRate)+(cache?.measuredRequests?' ('+count(cache.totalTokens)+' tok)':'');
+  $('strip-cache-total').textContent=cache?.measuredRequests?compact(cache.totalTokens):'—';
+  $('cache-tab').title=percent(cache?.hitRate)+(cache?.measuredRequests?' ('+count(cache.totalTokens)+')':'');
   for(const [field,id]of[['cachedTokens','cache-read'],['uncachedTokens','cache-miss'],['cacheWriteTokens','cache-write'],['outputTokens','cache-output']])$(id).textContent=cache?.measuredRequests?`${count(cache[field])} tok`:'—';
-  $('cache-coverage').textContent=cache?.measuredRequests?`${count(cache.totalTokens)} tok`:'— tok';
+  $('cache-coverage').textContent=speed?(language.language==='zh-CN'?`${speed.rounds}轮 ${speed.steps}步 (${speed.measuredRequests}次)`:`${speed.rounds} turns, ${speed.steps} steps (${speed.measuredRequests})`):'—';
   $('cache-write-row').hidden=!(cache?.cacheWriteTokens>0);
   $('cache-note').textContent=[cache?.measuredRequests?t('cacheBasis'):t('cacheUnavailable'),cache?.measuredRequests&&cache.missingRequests?t('cacheMissing',{n:cache.missingRequests}):'',savedNote.trim(),saveWarning.trim()].filter(Boolean).join(' ');
   $('connection-dot').className = `connection-dot ${snapshot.connection}`;
@@ -243,7 +425,9 @@ function refresh(force = false) {
     else { $('health-note').textContent = language.errorMessage(error.message); $('health-note').classList.add('warning'); }
   } finally {
     pending = false; refreshRequest=null;
-    clearTimeout(timer); timer = setTimeout(refresh, document.hidden ? 10000 : 2200);
+    clearTimeout(timer);
+    const fastPoll = !document.hidden && (selectedCard === 'speed' || snapshot?.speed?.liveTiming?.isRunning);
+    timer = setTimeout(refresh, document.hidden ? 10000 : fastPoll ? Math.max(500, sampleIntervalMs) : 2200);
   }
   })();
   return refreshRequest;
@@ -255,12 +439,35 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 window.addEventListener('pagehide',()=>preferences.dispose());
 window.addEventListener('pageshow',event=>{if(event.persisted)preferences=connectPreferences();});
 setInterval(updateCountdowns,1000);
+setInterval(()=>{if(snapshot?.speed?.liveTiming?.isRunning)updateLiveTiming();},200);
+for(const pill of document.querySelectorAll('.sample-pill')){
+  pill.setAttribute('aria-pressed',String(Number(pill.dataset.sampleMs)===sampleIntervalMs));
+  pill.addEventListener('click',()=>{
+    const ms=Number(pill.dataset.sampleMs);
+    if(!SAMPLE_OPTIONS.includes(ms))return;
+    sampleIntervalMs=ms;localSet('ag-pulse-tps-interval',String(ms));
+    for(const p of document.querySelectorAll('.sample-pill'))p.setAttribute('aria-pressed',String(Number(p.dataset.sampleMs)===ms));
+    restartSampleTimer();renderTpsChart();
+  });
+}
+const chartSvg=$('tps-chart-svg');
+if(chartSvg){
+  chartSvg.addEventListener('pointermove',event=>{
+    if(!tpsSeries.length)return;
+    const rect=chartSvg.getBoundingClientRect();if(rect.width<=0)return;
+    const ratio=Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width));
+    const idx=tpsSeries.length===1?0:Math.round(ratio*(tpsSeries.length-1));
+    if(idx!==tpsChartHoverIdx){tpsChartHoverIdx=idx;renderTpsChart();}
+  });
+  chartSvg.addEventListener('pointerleave',()=>{if(tpsChartHoverIdx!==null){tpsChartHoverIdx=null;renderTpsChart();}});
+}
+restartSampleTimer();
 if(window.__agPulseUsageFactory&&$('cache-card')){
   const section=document.createElement('div');section.id='usage-entry';section.hidden=true;
   section.innerHTML='<dl class="usage-summary"><div><dt id="usage-today-label"></dt><dd><strong id="usage-today"></strong><span class="usage-unit">Token</span></dd></div><div><dt id="usage-month-label"></dt><dd><strong id="usage-month"></strong><span class="usage-unit">Token</span></dd></div></dl><button type="button" id="open-usage"><span id="usage-open-label"></span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
   $('cache-card').append(section);
   const css=document.createElement('style');
-  css.textContent='#usage-entry{border-top:1px solid var(--pulse-separator);padding-top:13px;margin-top:14px}#usage-entry[hidden]{display:none}.usage-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;padding-bottom:13px;border-bottom:1px solid var(--pulse-separator)}.usage-summary>div{display:block;min-width:0;margin:0}.usage-summary dt{font-size:10px;line-height:16px;color:var(--pulse-muted);margin:0 0 5px}.usage-summary dd{display:flex;align-items:baseline;justify-content:flex-start;gap:5px;margin:0;white-space:nowrap;text-align:left;line-height:24px}.usage-summary strong{font-size:20px;font-weight:550;letter-spacing:-.5px;color:var(--pulse-foreground);font-variant-numeric:tabular-nums}.usage-unit{font-size:9px;letter-spacing:0;color:var(--pulse-muted)}#open-usage{width:calc(100% + 12px);display:flex;align-items:center;justify-content:space-between;min-height:34px;gap:12px;margin:5px -6px -3px;padding:7px 6px;border:0;border-radius:6px;background:transparent;color:var(--pulse-label);font:inherit;font-size:11px;text-align:left;line-height:20px;cursor:pointer;transition:background 140ms ease,transform 120ms ease}#open-usage:hover{background:var(--pulse-hover);color:var(--pulse-foreground)}#open-usage:active{transform:scale(.98)}#open-usage svg{width:14px;height:14px;color:var(--pulse-muted);flex:none}';
+  css.textContent='#usage-entry{border-top:1px solid var(--pulse-separator);padding-top:13px;margin-top:14px}#usage-entry[hidden]{display:none}.usage-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;padding-bottom:13px;border-bottom:1px solid var(--pulse-separator)}.usage-summary>div{display:block;min-width:0;margin:0}.usage-summary dt{font-size:10px;line-height:16px;color:var(--pulse-muted);margin:0 0 5px}.usage-summary dd{display:flex;align-items:baseline;justify-content:flex-start;gap:5px;margin:0;white-space:nowrap;text-align:left;line-height:24px}.usage-summary strong{font-size:20px;font-weight:550;letter-spacing:-.5px;color:var(--pulse-foreground);font-variant-numeric:tabular-nums}.usage-unit{font-size:9px;letter-spacing:0;color:var(--pulse-muted)}#open-usage{position:relative;isolation:isolate;width:calc(100% + 12px);display:flex;align-items:center;justify-content:space-between;min-height:34px;gap:12px;margin:5px -6px -3px;padding:7px 6px;border:0;border-radius:6px;background:transparent;color:var(--pulse-label);font:inherit;font-size:11px;text-align:left;line-height:20px;cursor:pointer;transition:color 140ms ease}#open-usage::before{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--pulse-hover);opacity:0;transform:scale(.96);transition:transform 200ms cubic-bezier(.22,1,.36,1),opacity 140ms ease;z-index:-1}#open-usage:hover{color:var(--pulse-foreground)}#open-usage:hover::before{opacity:1;transform:scale(1)}#open-usage:active::before{transform:scale(.97);transition-duration:75ms}#open-usage svg{width:14px;height:14px;color:var(--pulse-muted);flex:none;transition:transform 200ms cubic-bezier(.22,1,.36,1),color 140ms ease}#open-usage:hover svg{transform:translateX(3px);color:var(--pulse-foreground)}';
   document.head.append(css);
   const pricingRequest=async(input)=>{
     const transport=host?.fetch?host.fetch.bind(host):fetch;
@@ -270,13 +477,13 @@ if(window.__agPulseUsageFactory&&$('cache-card')){
     return data;
   };
   usageDashboard=window.__agPulseUsageFactory({root:document.body,language,setMarkup:(el,html)=>{el.innerHTML=html;},hostLabel:'Antigravity',guideDismissed:usageGuideDismissed,onDismissGuide:async()=>{const saved=await preferenceRequest({usageGuideDismissed:true});if(saved?.usageGuideDismissed!==true)throw Error('Usage guide could not be saved');usageGuideDismissed=true;usageDashboard?.syncGuideDismissed();},onLanguage:next=>preferences.choose(next),onRefresh:()=>refreshManually(),onPricing:pricingRequest});
-  $('open-usage').addEventListener('click',()=>usageDashboard.open(snapshot?.usage,$('open-usage')));
+  $('open-usage').addEventListener('click',()=>usageDashboard.open(snapshot?.usage,$('open-usage'),null,$('open-usage').getBoundingClientRect()));
   if($('context-card')){
     const estEntry=document.createElement('div');estEntry.id='est-entry';estEntry.hidden=true;
     estEntry.innerHTML='<button type="button" id="open-estimate"><span id="est-open-label"></span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
     $('context-card').append(estEntry);
-    css.textContent+='#est-entry{border-top:1px solid var(--pulse-separator);margin-top:12px;padding-top:6px}#est-entry[hidden]{display:none}#open-estimate{width:calc(100% + 12px);display:flex;align-items:center;justify-content:space-between;min-height:32px;gap:12px;margin:0 -6px -3px;padding:6px 6px;border:0;border-radius:6px;background:transparent;color:var(--pulse-label);font:inherit;font-size:11px;text-align:left;cursor:pointer;transition:background 140ms ease,transform 120ms ease}#open-estimate:hover{background:var(--pulse-hover);color:var(--pulse-foreground)}#open-estimate:active{transform:scale(.98)}#open-estimate svg{width:14px;height:14px;color:var(--pulse-muted);flex:none}';
-    $('open-estimate').addEventListener('click',()=>usageDashboard.open(snapshot?.usage,$('open-estimate'),'estimate'));
+    css.textContent+='#est-entry{border-top:1px solid var(--pulse-separator);margin-top:12px;padding-top:6px}#est-entry[hidden]{display:none}#open-estimate{position:relative;isolation:isolate;width:calc(100% + 12px);display:flex;align-items:center;justify-content:space-between;min-height:32px;gap:12px;margin:0 -6px -3px;padding:6px 6px;border:0;border-radius:6px;background:transparent;color:var(--pulse-label);font:inherit;font-size:11px;text-align:left;cursor:pointer;transition:color 140ms ease}#open-estimate::before{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--pulse-hover);opacity:0;transform:scale(.96);transition:transform 200ms cubic-bezier(.22,1,.36,1),opacity 140ms ease;z-index:-1}#open-estimate:hover{color:var(--pulse-foreground)}#open-estimate:hover::before{opacity:1;transform:scale(1)}#open-estimate:active::before{transform:scale(.97);transition-duration:75ms}#open-estimate svg{width:14px;height:14px;color:var(--pulse-muted);flex:none;transition:transform 200ms cubic-bezier(.22,1,.36,1),color 140ms ease}#open-estimate:hover svg{transform:translateX(3px);color:var(--pulse-foreground)}';
+    $('open-estimate').addEventListener('click',()=>usageDashboard.open(snapshot?.usage,$('open-estimate'),'estimate',$('open-estimate').getBoundingClientRect()));
   }
 }
 localize();

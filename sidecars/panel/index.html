@@ -35,7 +35,7 @@
       </button>
       <button class="metric-chip" id="cache-tab" type="button" role="tab" data-card="cache" aria-controls="cache-card" aria-selected="false" tabindex="-1">
         <span class="metric-label"><svg class="icon"><use href="#cache"/></svg><span data-i18n="panelCache">Cache</span></span>
-        <span class="chip-primary"><strong id="strip-cache">—</strong></span><span class="chip-secondary" id="strip-cache-total">— tok</span>
+        <span class="chip-primary"><strong id="strip-cache">—</strong></span><span class="chip-secondary" id="strip-cache-total">—</span>
       </button>
       <button class="metric-chip" id="context-tab" type="button" role="tab" data-card="context" aria-controls="context-card" aria-selected="false" tabindex="-1">
         <span class="metric-label"><svg class="icon"><use href="#gauge"/></svg><span data-i18n="panelContext">Context</span></span>
@@ -48,26 +48,33 @@
     </section>
     <section class="card-stage" data-i18n-aria="panelDetails" aria-label="Metric details">
       <article class="detail-card" id="speed-card" role="tabpanel" tabindex="0" aria-labelledby="speed-tab">
-        <div class="card-heading"><span><svg class="icon"><use href="#gauge"/></svg><span data-i18n="session">Session statistics</span></span><span class="card-tag" id="request-count">— samples</span></div>
-        <dl>
-          <div><dt><span data-i18n="modelTime">Model time</span></dt><dd id="model-time">—</dd></div>
-          <div><dt><span data-i18n="toolTime">Tool time</span></dt><dd id="tool-time">—</dd></div>
-          <div><dt><span data-i18n="ttft">Average TTFT</span></dt><dd id="ttft">—</dd></div>
-          <div class="emphasis"><dt><span data-i18n="sessionTps">Session TPS</span></dt><dd><span id="session-tps">—</span> tok/s</dd></div>
-          <div><dt><span data-i18n="latest">Last request</span></dt><dd><span id="latest-tps">—</span> tok/s</dd></div>
-          <div class="divider"><dt><span data-i18n="tokens">Response / thinking</span></dt><dd id="token-detail">—</dd></div>
-        </dl>
+        <div class="card-heading">
+          <span><svg class="icon"><use href="#gauge"/></svg><span data-i18n="session">Session</span></span>
+          <div class="sample-pills" role="group" data-i18n-aria="tpsSampleRate" aria-label="Sample"><button type="button" class="sample-pill" data-sample-ms="500" aria-pressed="false">0.5s</button><button type="button" class="sample-pill" data-sample-ms="1000" aria-pressed="true">1s</button><button type="button" class="sample-pill" data-sample-ms="2000" aria-pressed="false">2s</button><button type="button" class="sample-pill" data-sample-ms="5000" aria-pressed="false">5s</button></div>
+        </div>
+        <div class="tps-chart-box" id="tps-chart-box">
+          <div class="tps-chart-meta"><span id="tps-chart-peak">—</span><span id="tps-chart-hover" class="tps-hover-readout"></span><span id="tps-chart-avg-label">—</span></div>
+          <svg class="tps-chart-svg" id="tps-chart-svg" viewBox="0 0 288 84" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <div class="tps-chart-empty" id="tps-chart-empty" data-i18n="tpsWaitingChart">Waiting for TPS samples…</div>
+        </div>
+        <div class="speed-grid">
+          <div class="metric-cell" id="model-time-cell"><span class="cell-label"><i class="live-dot" aria-hidden="true"></i><span data-i18n="modelTime">Model time</span></span><strong id="model-time">—</strong></div>
+          <div class="metric-cell" id="tool-time-cell"><span class="cell-label"><i class="live-dot" aria-hidden="true"></i><span data-i18n="toolTime">Tool time</span></span><strong id="tool-time">—</strong></div>
+          <div class="metric-cell"><span class="cell-label" data-i18n="ttft">Avg TTFT</span><strong id="ttft">—</strong></div>
+          <div class="metric-cell"><span class="cell-label" data-i18n="tpsLastSession">Last / Avg</span><strong id="tps-last-avg">—</strong></div>
+        </div>
         <p class="card-footnote" id="speed-basis"></p>
       </article>
       <article class="detail-card" id="cache-card" role="tabpanel" tabindex="0" aria-labelledby="cache-tab" hidden>
         <div class="card-heading"><span><svg class="icon"><use href="#cache"/></svg><span data-i18n="cacheTitle">Token usage</span></span><span class="card-tag" id="cache-coverage">—</span></div>
-        <dl><div><dt data-i18n="cacheRate">Cache hit</dt><dd id="cache-rate">—</dd></div><div><dt data-i18n="cacheMiss">Uncached</dt><dd id="cache-miss">—</dd></div><div><dt data-i18n="cacheRead">Cache read</dt><dd id="cache-read">—</dd></div><div><dt data-i18n="cacheOutput">Output</dt><dd id="cache-output">—</dd></div><div id="cache-write-row" hidden><dt data-i18n="cacheWrite">Cache write</dt><dd id="cache-write">—</dd></div></dl><p class="card-footnote" id="cache-note"></p>
+        <dl><div><dt data-i18n="cacheRate">Cache hit</dt><dd id="cache-rate">—</dd></div><div><dt data-i18n="cacheMiss">Uncached</dt><dd id="cache-miss">—</dd></div><div><dt data-i18n="cacheRead">Cache read</dt><dd id="cache-read">—</dd></div><div><dt data-i18n="cacheOutput">Output</dt><dd id="cache-output">—</dd></div><div><dt data-i18n="tokens">Response / thinking</dt><dd id="token-detail">—</dd></div><div id="cache-write-row" hidden><dt data-i18n="cacheWrite">Cache write</dt><dd id="cache-write">—</dd></div></dl><p class="card-footnote" id="cache-note"></p>
       </article>
       <article class="detail-card" id="context-card" role="tabpanel" tabindex="0" aria-labelledby="context-tab" hidden>
-        <div class="card-heading"><span data-i18n="context">Context window</span></div>
-        <strong id="context-summary">—</strong><p id="context-tokens">—</p>
-        <div class="quota-track" role="progressbar" data-i18n-aria="context" id="context-track"><i id="context-fill"></i></div>
-        <dl><div><dt data-i18n="contextModel">Model</dt><dd id="context-model">—</dd></div></dl><p class="card-footnote" id="context-note"></p>
+        <div class="card-heading"><span data-i18n="context">Context window</span><span class="card-tag" id="context-model">—</span></div>
+        <div class="ctx-top"><strong id="context-summary">—</strong><span id="context-tokens">—</span></div>
+        <div class="seg-track" role="progressbar" data-i18n-aria="context" id="context-track"><i id="context-fill"></i></div>
+        <div class="ctx-breakdown" id="context-breakdown" hidden></div>
+        <p class="card-footnote" id="context-note"></p>
         <div class="quota-details">
       <section class="quota-section" id="five-details" role="region" data-i18n-aria="five" aria-label="5h quota">
         <div class="card-heading"><span><svg class="icon"><use href="#clock"/></svg><span data-i18n="five">5h quota</span></span><span class="card-tag group-name">—</span></div>

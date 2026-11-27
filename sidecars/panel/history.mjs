@@ -7,7 +7,7 @@ import { RATE_VERSION, RATE_REASONS } from './rate-quality.mjs';
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SCOPE = /^[0-9a-f]{64}$/;
-const numeric = ['steps','rounds','requests','measuredRequests','missingTiming','tps','latestTps','streamingSeconds','modelSeconds','toolSeconds','ttftSeconds','excludedTiming','rateWarnings'];
+const numeric = ['steps','rounds','requests','measuredRequests','missingTiming','tps','latestTps','outputTps','latestOutputTps','streamingSeconds','modelSeconds','toolSeconds','ttftSeconds','excludedTiming','rateWarnings'];
 const counts = ['input','output','responseOutput','thinkingOutput','cacheRead','cacheWrite'];
 const cache = ['inputTokens','cachedTokens','cacheWriteTokens','uncachedTokens','outputTokens','measuredRequests','missingRequests','totalTokens','hitRate'];
 const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -25,13 +25,19 @@ export function safeMetrics(value, conversationId) {
   result.model = typeof value.model === 'string' ? value.model.slice(0,256) : null;
   result.status = typeof value.status === 'string' && /^[A-Z0-9_]+$/.test(value.status) ? value.status : null;
   result.context = safeContext(value.context) || null;
+  result.tpsHistory = Array.isArray(value.tpsHistory)
+    ? value.tpsHistory.slice(-30)
+      .filter(p => p && typeof p === 'object' && number(p.tps) && number(p.duration))
+      .map(p => ({ tps: p.tps, duration: p.duration }))
+    : [];
   result.rateVersion = value.rateVersion === RATE_VERSION ? RATE_VERSION : 0;
   result.timingReasons = Object.fromEntries(RATE_REASONS.map(key=>[key,number(value.timingReasons?.[key]) ? value.timingReasons[key] : 0]));
   result.latestRateStatus = ['ok','missing','unreliable'].includes(value.latestRateStatus) ? value.latestRateStatus : 'missing';
   if (result.rateVersion !== RATE_VERSION) {
     // Old aggregates cannot be repaired without the raw trajectory. Retain
     // usage/context, but never present a legacy unvalidated rate as trustworthy.
-    result.tps = result.latestTps = result.streamingSeconds = null;
+    result.tps = result.latestTps = result.outputTps = result.latestOutputTps = result.streamingSeconds = null;
+    result.tpsHistory = [];
     result.measuredRequests = 0;
     result.latestRateStatus = 'legacy';
     result.latestShortSample = false;

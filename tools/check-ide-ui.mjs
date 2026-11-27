@@ -39,6 +39,7 @@ try{
  // Keep a constrained, scrolled card open across multiple real polling ticks.
  // Identical preferences must not replace its labels or oscillate maxHeight.
  await page.locator('[data-card=context]').click();
+ await page.waitForTimeout(350);
  const stable=await page.evaluate(async()=>{
    const root=document.getElementById('ag-pulse-status-bar').shadowRoot,card=root.getElementById('context-card');
    card.scrollTop=80;const scroll=card.scrollTop,rect=card.getBoundingClientRect().toJSON(),requests=metricsRequests.length;
@@ -54,7 +55,7 @@ try{
  await page.evaluate(()=>{const original=agPulseHost.getMetrics;agPulseHost.getMetrics=async input=>{const data=await original(input);return {...data,speed:data.speed&&testQuality?{...data.speed,...testQuality,conversationId:data.speed.conversationId}:data.speed};};});
  const quality=trajectoryMetrics({trajectory:{generatorMetadata:[{stepIndices:[0],chatModel:{usage:{outputTokens:17776,responseOutputTokens:17776},streamingDuration:.349271,timeToFirstToken:106}}],steps:[{type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',plannerResponse:{toolCalls:[{}]}}]}});
  await page.evaluate(quality=>{testQuality=quality;},quality);
- await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar').shadowRoot.getElementById('latest-rate').textContent==='Timing uncertain');
+ await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar').shadowRoot.getElementById('tps-last-avg').textContent.startsWith('Timing uncertain'));
  await page.keyboard.press('Escape');await page.locator('[data-card=speed]').click();
  assert.equal(await page.locator('#rate-note').textContent(),'Response ÷ stream time');
  assert.equal(await page.locator('#tps').textContent(),'—');
@@ -62,9 +63,10 @@ try{
  await page.evaluate(()=>{testQuality=null;});
  await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar').shadowRoot.getElementById('tps').textContent==='200.0');
  await page.keyboard.press('Escape');
- await page.locator('[data-card=context]').click();await page.locator('#card-language-zh').click();await page.waitForTimeout(150);assert.equal((await state()).lang,'zh-CN');await page.keyboard.press('Escape');
+ await page.locator('[data-card=context]').click();
+ await page.waitForTimeout(350);await page.locator('#card-language-zh').click();await page.waitForTimeout(150);assert.equal((await state()).lang,'zh-CN');await page.keyboard.press('Escape');
  await page.evaluate(quality=>{testQuality=quality;},quality);
- await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar').shadowRoot.getElementById('latest-rate').textContent==='计时异常');
+ await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar').shadowRoot.getElementById('tps-last-avg').textContent.startsWith('计时异常'));
  await page.locator('[data-card=speed]').click();assert.equal(await page.locator('#rate-note').textContent(),'正文 ÷ 流式时长');
  await page.screenshot({path:join(repo,'.data/ide/tps-quality-zh.png')});await page.keyboard.press('Escape');await page.evaluate(()=>{testQuality=null;});
  // A different child/subagent/history ID must never win over the input owner.

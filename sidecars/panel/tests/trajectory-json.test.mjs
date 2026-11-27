@@ -95,3 +95,17 @@ test('a real HTTP step page above the old 32 MiB cap restores all metrics withou
  assert.equal(trajectoryMetrics(raw).tps,100);assert.equal(trajectoryMetrics(raw).cache.hitRate,.75);
  console.log(JSON.stringify({longConversationRegression:true,wireBytes,retainedBytes:Buffer.byteLength(JSON.stringify(raw)),context:trajectoryMetrics(raw).context.usedTokens,cache:trajectoryMetrics(raw).cache.hitRate}));
 });
+test('running PLANNER_RESPONSE projects live thinking+response+toolCalls streamBytes without retaining private text',()=>{
+ const runningRaw={status:'CASCADE_RUN_STATUS_RUNNING',trajectory:{cascadeId:id,steps:[
+  {type:'CORTEX_STEP_TYPE_USER_INPUT',userInput:{text:'SECRET PROMPT'}},
+  {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',status:'CORTEX_STEP_STATUS_RUNNING',
+   metadata:{createdAt:'2026-11-27T13:35:44Z',viewableAt:'2026-11-27T13:35:50Z'},
+   plannerResponse:{thinking:'SECRET THINKING 思考链',response:'SECRET REPLY 回复',toolCalls:[{name:'edit_file',args:'SECRET CODE'}]}},
+ ],generatorMetadata:[]}};
+ const projected=project(JSON.stringify(runningRaw),17);
+ assert.equal(JSON.stringify(projected).includes('SECRET'),false);
+ const mProj=trajectoryMetrics(projected),mRaw=trajectoryMetrics(runningRaw);
+ assert.deepEqual(mProj,mRaw);
+ assert.ok(mProj.liveStream.bytes>30);
+ assert.equal(mProj.liveStream.hasFirstToken,true);
+});

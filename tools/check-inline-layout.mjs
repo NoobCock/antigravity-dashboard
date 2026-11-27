@@ -87,7 +87,7 @@ try{
       // Translated chip widths can move the card away from the pointer. A
       // pointer-focused choice no longer pins it after leaving; reopen through
       // its actual chip before exercising the reverse language selection.
-      await strip.locator('[data-card=context]').click();
+      if(!(await strip.locator('#context-card').isVisible()))await strip.locator('[data-card=context]').click();
       await strip.locator(oldLanguage==='en'?'#card-language-en':'#card-language-zh').click();
       await page.waitForFunction(old=>document.getElementById('ag-pulse-status-bar')?.lang===old,oldLanguage);
       await page.keyboard.press('Escape');
@@ -120,7 +120,7 @@ try{
       await page.evaluate(()=>{document.getElementById('floating-host-action').remove();document.getElementById('scroll-messages').remove();document.querySelector('.composer').removeAttribute('style')});
       await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar')?.dataset.layout==='ready');
       // New absolutely positioned host controls must dismiss a currently open card.
-      await strip.locator('[data-card=context]').hover();await strip.locator('#context-card').waitFor({state:'visible'});
+      await strip.locator('[data-card=context]').click();await strip.locator('#context-card').waitFor({state:'visible'});
       await page.evaluate(()=>{const controls=document.querySelector('.controls'),strip=document.getElementById('ag-pulse-status-bar');const r=strip.getBoundingClientRect(),row=strip.parentElement.getBoundingClientRect();controls.style.cssText=`position:absolute;left:${r.x-row.x+8}px;top:0`;});
       await page.waitForFunction(()=>document.getElementById('ag-pulse-status-bar')?.dataset.layout==='blocked');
       assert.equal(await strip.locator('#context-card').isVisible(),false);await clickable(page);

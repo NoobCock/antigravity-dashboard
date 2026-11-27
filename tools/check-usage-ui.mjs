@@ -60,10 +60,10 @@ try{
  // Pointer dismissal restores the chip's focus without pinning its hover
  // card. Keyboard dismissal must still return an operable keyboard focus.
  await page.locator('#usage-dashboard #close').click();await page.mouse.move(80,80);await page.waitForTimeout(450);
- assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),true,'Pointer modal close must not reopen/pin the hover card');
- await page.locator('[data-card=cache]').hover();await page.waitForTimeout(350);assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),false);
- await page.mouse.move(80,80);await page.waitForTimeout(450);assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),true,'Hover must auto-dismiss after returning from usage');
- await page.locator('[data-card=cache]').click();await page.mouse.move(80,80);await page.waitForTimeout(450);assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),true,'Pointer-focused chip must not pin the card');
+ assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),true,'Pointer modal close must not reopen/pin the card');
+ await page.locator('[data-card=cache]').hover();await page.waitForTimeout(350);assert.equal(await page.locator('#cache-mini').evaluate(n=>n.hidden),false);assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),true);
+ await page.mouse.move(80,80);await page.waitForTimeout(450);assert.equal(await page.locator('#cache-mini').evaluate(n=>n.hidden),true,'Hover mini preview must auto-dismiss after returning from usage');
+ await page.locator('[data-card=cache]').click();assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),false);await page.mouse.click(80,80);await page.waitForTimeout(150);assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),true,'Outside click dismisses the pinned card');
  await page.keyboard.press('Tab');await page.locator('[data-card=cache]').focus();
  assert.equal(await page.locator('[data-card=cache]').evaluate(n=>n.matches(':focus-visible')),true);
  assert.equal(await page.locator('#cache-card').evaluate(n=>n.hidden),false,'Keyboard focus opens the card');
