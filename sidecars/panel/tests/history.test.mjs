@@ -117,3 +117,24 @@ test('same coverage quality correction with fewer eligible samples replaces save
   const incomplete={...fresh,complete:false,tps:1};await history.save(a,id,incomplete);
   assert.equal((await history.load(a,id)).metrics.tps,40);
 });
+
+test('preferCached returns SessionHistory immediately and unchanged idle summaries skip redundant cold RPCs',async t=>{
+  const {history}=await fixture(t),a=scope('a@example.test');
+  const savedRecord=await history.save(a,id,trajectoryMetrics(raw(2)));
+  let rpcCalls=0;
+  const c=client(async()=>{rpcCalls++;return raw(2);});
+  c.reader={summaries:{[id]:{status:'CASCADE_RUN_STATUS_IDLE',stepCount:0,lastModifiedTime:new Date(Date.parse(savedRecord.savedAt)-5000).toISOString()}}};
+  const store=new MetricsStore(c,{history});
+  const fast=await store.snapshot({conversationId:id,preferCached:true});
+  assert.equal(fast.speed.tps,50);
+  assert.equal(fast.speed.speedRefreshing,false);
+  assert.equal(rpcCalls,0);
+  // Even a non-preferCached live snapshot skips cold RPC when idle summary proves history is up to date
+  const store2=new MetricsStore(c,{history});
+  const freshIdle=await store2.snapshot({conversationId:id});
+  assert.equal(freshIdle.speed.tps,50);
+  assert.equal(rpcCalls,0);
+  // Force refresh still hits live RPC
+  await store2.snapshot({conversationId:id,force:true});
+  assert.equal(rpcCalls,1);
+});

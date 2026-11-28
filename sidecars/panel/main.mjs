@@ -32,11 +32,32 @@ const updater=new DashboardUpdater({
 store.onTrajectory=(scope,id,raw)=>usage.ingest(scope,id,raw);
 const preferences=new PreferencesStore();
 const ownership=process.env.ANTIGRAVITY_SIDECAR_WEB_PORT?new SidecarOwner(platformPaths().data):null;
-const metrics = async input => {
-  const base=await store.snapshot(input);if(input?.force)void usage.sync();
+const metrics = async (input, { signal = null } = {}) => {
+  const base=await store.snapshot({
+    conversationId:input?.conversationId||null,
+    force:input?.force===true,
+    preferCached:input?.preferCached===true,
+    signal,
+  });
+  if(input?.sessionOnly===true){
+    return {
+      partial:true,
+      connection:base.connection,
+      error:base.error,
+      sessionError:base.sessionError,
+      serverTime:base.serverTime,
+      speed:base.speed,
+      persistenceError:base.persistenceError,
+    };
+  }
+  if(input?.force)void usage.sync();
   void pricingStore.refreshLive().catch(()=>{});
-  const pricingOptions=await pricingStore.options().catch(()=>null);
-  const pricingMeta=await pricingStore.meta().catch(()=>null);
+  const [pricingOptions,pricingMeta,prefs,theme]=await Promise.all([
+    pricingStore.options().catch(()=>null),
+    pricingStore.meta().catch(()=>null),
+    preferences.snapshot(),
+    readHostTheme(),
+  ]);
   const pricingKey=`${pricingMeta?.liveFetchedAt||''}:${JSON.stringify(pricingOptions?.overrides||{})}`;
   const usageSnapshot=await usage.snapshot({pricingOptions,pricingKey});
   const loaded=store.identity?await usage.ledger.records(store.identity).catch(()=>null):null;
@@ -48,7 +69,7 @@ const metrics = async input => {
     usage:usageSnapshot?{...usageSnapshot,quotaEstimate}:null,
     update:updater.snapshot(),
     keepAlive:keepAlive.snapshot(),
-    preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health,
+    preferences:prefs,theme,integration:integration.health,
   };
 };
 const usageSource=()=>{const s=readFileSync(join(HERE,'..','..','compat','usage-ui.cjs'),'utf8');return `window.__agPulseUsageFactory=(${s.slice(s.indexOf('module.exports = ')+17).trim().replace(/;$/,'')});`;};
@@ -69,7 +90,7 @@ const runtimeSettings = () => {
   return settings;
 };
 const integration = new RuntimeUi({
-  snapshot: input => metrics(input),
+  snapshot: (input, options) => metrics(input, options),
   preferences,
   pricing: pricingStore,
   updater,
@@ -93,7 +114,7 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.page('/i18n.js',i18nModule);
   app.page('/theme.js',themeModule);
   app.api('/theme.css',()=>new Response(themeCss(),{contentType:'text/css'}),'GET');
-  app.api('/api/metrics', data => metrics({ conversationId: data.conversationId || null, force: data.force === true || data.force === '1' }), 'GET');
+  app.api('/api/metrics', data => metrics({ conversationId: data.conversationId || null, force: data.force === true || data.force === '1', preferCached: data.preferCached === true || data.preferCached === '1', sessionOnly: data.sessionOnly === true || data.sessionOnly === '1' }), 'GET');
   app.api('/api/integration', () => ({ ...integration.health, keepAlive: keepAlive.snapshot() }), 'GET');
   app.api('/api/preferences',()=>preferences.snapshot(),'GET');
   app.api('/api/preferences',async data=>{try{return await preferences.set(data);}catch{return new Response(JSON.stringify({error:'Language preference could not be saved'}),{status:400,contentType:'application/json'});}},'POST');

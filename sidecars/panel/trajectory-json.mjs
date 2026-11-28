@@ -12,6 +12,8 @@ const chatModelNode={usage,model:scalar,modelDisplayName:scalar,responseModel:sc
    tokenBreakdown:{totalTokens:scalar,groups:{'*':breakdownGroup}}}}};
 const generators={'*':{stepIndices:{'*':scalar},chatModel:chatModelNode}};
 const TOOL_STEP_RE=/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i;
+const ACTIVE_PLANNER_STATUS_RE=/RUNNING|IN_PROGRESS|GENERATING|STREAMING|PENDING/i;
+const DONE_STATUS_RE=/DONE|COMPLETED/i;
 const plannerNode={thinking:length,response:nonempty,toolCalls:calls};
 const stepNode={type:scalar,status:scalar,metadata:{createdAt:scalar,viewableAt:scalar,finishedGeneratingAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence,modelUsage:stepUsage},
  checkpoint:{checkpointIndex:scalar,includedStepIndexStart:scalar,includedStepIndexEnd:scalar,sessionSummary:length},
@@ -72,32 +74,33 @@ export class TrajectoryJson {
     const typeStr=String(f.out.type||'');
     const isCheckpoint=/CHECKPOINT/i.test(typeStr);
     const isPlanner=/PLANNER_RESPONSE/.test(typeStr);
-    const isRunningPlanner=isPlanner&&/RUNNING|IN_PROGRESS/i.test(String(f.out.status||''));
+    const statusStr=String(f.out.status||'');
+    const isRunningPlanner=isPlanner&&ACTIVE_PLANNER_STATUS_RE.test(statusStr);
     if(f.out.plannerResponse&&typeof f.out.plannerResponse==='object'){
      const sb=f.out.plannerResponse._streamBytes||0;
      delete f.out.plannerResponse._streamBytes;
      if(isRunningPlanner)f.out.plannerResponse.streamBytes=sb;
     }
     if(!isCheckpoint){
-     if(!isRunningPlanner&&Object.hasOwn(f.out,'status')){this.retained=Math.max(0,this.retained-retainedSize(f.out.status));delete f.out.status;}
+     const meta=f.out.metadata&&typeof f.out.metadata==='object'?f.out.metadata:null;
+     const isTool=!isPlanner&&(TOOL_STEP_RE.test(typeStr)||Boolean(meta?.toolCall));
+     const keepStatus=isRunningPlanner||(isPlanner&&statusStr&&!DONE_STATUS_RE.test(statusStr)&&!meta?.finishedGeneratingAt)||(isTool&&!meta?.completedAt);
+     if(!keepStatus&&Object.hasOwn(f.out,'status')){this.retained=Math.max(0,this.retained-retainedSize(f.out.status));delete f.out.status;}
      if(Object.hasOwn(f.out,'checkpoint')){this.retained=Math.max(0,this.retained-retainedSize(f.out.checkpoint));delete f.out.checkpoint;}
-     const meta=f.out.metadata;
-     if(meta&&typeof meta==='object'){
+     if(meta){
       if(Object.hasOwn(meta,'modelUsage')){this.retained=Math.max(0,this.retained-retainedSize(meta.modelUsage));delete meta.modelUsage;}
-      const isTool=TOOL_STEP_RE.test(typeStr)||Boolean(meta.toolCall);
       if(!isPlanner&&!isTool){
        this.retained=Math.max(0,this.retained-retainedSize(meta));delete f.out.metadata;
       }else{
-       if(isPlanner&&!isTool){
+       if(isPlanner){
         if(Object.hasOwn(meta,'startedAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.startedAt));delete meta.startedAt;}
         if(Object.hasOwn(meta,'completedAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.completedAt));delete meta.completedAt;}
-       }
-       if(!isPlanner){
+       }else{
         if(Object.hasOwn(meta,'viewableAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.viewableAt));delete meta.viewableAt;}
         if(Object.hasOwn(meta,'finishedGeneratingAt')){this.retained=Math.max(0,this.retained-retainedSize(meta.finishedGeneratingAt));delete meta.finishedGeneratingAt;}
-       }
-       if(isTool&&!isPlanner&&meta.startedAt&&Object.hasOwn(meta,'createdAt')){
-        this.retained=Math.max(0,this.retained-retainedSize(meta.createdAt));delete meta.createdAt;
+        if(meta.startedAt&&Object.hasOwn(meta,'createdAt')){
+         this.retained=Math.max(0,this.retained-retainedSize(meta.createdAt));delete meta.createdAt;
+        }
        }
        if(!Object.keys(meta).length){this.retained=Math.max(0,this.retained-96);delete f.out.metadata;}
       }

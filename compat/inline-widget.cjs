@@ -40,6 +40,13 @@ module.exports = function installAgPulseInlineWidget() {
   const isWarm=()=>Boolean(miniName||cardName||Date.now()<warmUntil);
   let chosen=localGet('ag-pulse-group'),group=null;
   let refreshRequest=null,manualRequest=null,requestEpoch=0,disposed=false;
+  const convoCache=new Map();
+  let switchTimer=null,lastFullFetch=0;
+  function cacheSpeed(id,speed){
+    if(!id||!speed)return;
+    convoCache.delete(id);convoCache.set(id,speed);
+    if(convoCache.size>40)convoCache.delete(convoCache.keys().next().value);
+  }
   let composer=null,layoutFrame=null;
   let usageDashboard=null;
   let densityFrame=null,densityMotion=null,densityProbe=null;
@@ -89,13 +96,39 @@ module.exports = function installAgPulseInlineWidget() {
     const id=conversationId();
     if(id===lastConversation)return false;
     lastConversation=id;requestEpoch++;pending=false;refreshRequest=null;lastFetch=0;
+    clearTimeout(switchTimer);switchTimer=null;
     tpsSeries=[];tpsSeriesConvo=null;tpsChartHoverIdx=null;
     stopDensityMotion();densityFrame=null;densityProbe=null;
     manualRequest=null;refreshBusy(false);
-    data={connection:'offline',groups:[],speed:null};group=null;hide({immediate:true});
-    // Navigation has its own refresh budget. A request from the old composer
-    // must neither block the new route nor reset its polling clock on arrival.
-    queueMicrotask(()=>{if(!disposed)refresh();});return true;
+    const cachedSpeed=id?convoCache.get(id)||null:null;
+    const keepAccount=Boolean(data&&(data.groups?.length||data.usage||data.quotaEstimate));
+    data=keepAccount?{...data,speed:cachedSpeed,sessionError:null}:{connection:'offline',groups:[],speed:cachedSpeed};
+    if(!keepAccount)group=null;
+    if(cachedSpeed)seedTpsSeries(cachedSpeed);
+    hide({immediate:true});
+    // Navigation has its own refresh budget. Show cached/history session info
+    // immediately while debouncing heavy live trajectory RPCs across rapid clicks.
+    const epoch=requestEpoch;
+    const lightSwitch=keepAccount&&Date.now()-lastFullFetch<30000;
+    if(!id){
+      switchTimer=setTimeout(()=>{switchTimer=null;if(!disposed&&epoch===requestEpoch)refresh();},keepAccount?100:0);
+    }else if(cachedSpeed){
+      switchTimer=setTimeout(()=>{switchTimer=null;if(!disposed&&epoch===requestEpoch)refresh(false,{sessionOnly:lightSwitch});},140);
+    }else if(!keepAccount){
+      queueMicrotask(()=>{if(!disposed&&epoch===requestEpoch)refresh();});
+    }else{
+      queueMicrotask(()=>{
+        if(disposed||epoch!==requestEpoch)return;
+        void refresh(false,{preferCached:true,sessionOnly:lightSwitch}).then(res=>{
+          if(disposed||epoch!==requestEpoch||res?.superseded)return;
+          if(!res?.speed||res.speed.speedRefreshing){
+            clearTimeout(switchTimer);
+            switchTimer=setTimeout(()=>{switchTimer=null;if(!disposed&&epoch===requestEpoch)refresh(false,{sessionOnly:lightSwitch});},120);
+          }
+        });
+      });
+    }
+    return true;
   }
   function localize(){
     attribute(node,'lang',language.language);
@@ -794,7 +827,7 @@ module.exports = function installAgPulseInlineWidget() {
     .scope-note{margin:0 0 10px;color:var(--pulse-muted);font-size:10px}:host([data-scope=main]) .scope-note,:host([data-scope=ide]) .scope-note{display:none}
     .language-button[data-save-failed=true]{color:var(--pulse-warning);text-decoration:underline dotted}.context-ring{display:inline-block;flex:none;width:12px;height:12px;border-radius:50%;background:conic-gradient(var(--pulse-ring) var(--used-angle,0deg),var(--pulse-ring-track) 0);mask:radial-gradient(circle,transparent 43%,#000 47%)}:host(.narrow) .context-label{display:none}
     #rate-note{white-space:pre-line;font-size:11px;line-height:1.65}
-    .bar{gap:6px}.chip{font-size:11px;gap:5px;padding:3px 5px}.context-card>strong{font-size:16px}.context-card>p{margin:8px 0}.quota-heading{margin-top:14px;padding-top:12px;border-top:1px solid var(--pulse-separator)}.quota-title{display:flex;align-items:center;gap:6px;font-size:11px}.quota-title>span:first-child{display:flex;align-items:center;gap:6px;margin-right:auto}.quota-title strong{font-variant-numeric:tabular-nums;font-size:13px}.quota-section+.quota-section{border-top:1px solid var(--pulse-separator);margin-top:12px;padding-top:12px}.quota-section .track{margin:8px 0}.quota-section .footnote{margin-top:6px}.quota-section dl div{margin:6px 0}.context-label{white-space:nowrap}
+    .bar{gap:6px}.chip{font-size:11px;gap:5px;padding:3px 5px}.context-card>strong{font-size:16px}.context-card>p{margin:8px 0}.quota-heading{margin-top:14px;padding-top:12px;border-top:1px solid var(--pulse-separator)}.quota-title{display:flex;align-items:center;gap:6px;font-size:11px}.quota-title>span:first-child{display:flex;align-items:center;gap:6px;margin-right:auto;color:var(--pulse-label)}.quota-title strong{font-variant-numeric:tabular-nums;font-size:15px;font-weight:620;letter-spacing:-.02em;color:var(--pulse-foreground)}.quota-section+.quota-section{border-top:1px solid var(--pulse-separator);margin-top:12px;padding-top:12px}.quota-section .track{height:6px;border-radius:999px;margin:8px 0 9px}.quota-section .track i{border-radius:999px}.quota-section .footnote{margin-top:6px}.quota-section dl div{margin:6px 0}.quota-est-row dt,.quota-est-row dd{font-size:10.5px;color:var(--pulse-muted);font-weight:400}.context-label{white-space:nowrap}
     :host(.icons-only) .bar{gap:2px}:host(.icons-only) .chip{flex:0 0 24px;width:24px;min-width:24px;height:24px;padding:0;gap:0;justify-content:center}:host(.icons-only) .chip>:not(svg):not(.context-ring){display:none}:host(.icons-only) .bar>.language-button,:host(.icons-only) .bar>.dot{display:none}:host(.icons-only) .chip svg{display:block}.card-language{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--pulse-separator);font-size:10px;color:var(--pulse-muted)}
     .refresh{display:inline-grid;place-items:center}.refresh[aria-busy=true]{color:var(--pulse-emphasis);cursor:wait}.refresh[aria-busy=true] svg{animation:pulse-refresh-spin 1s linear infinite;transform-origin:center}
     @keyframes pulse-refresh-spin{to{transform:rotate(360deg)}}
@@ -846,7 +879,7 @@ module.exports = function installAgPulseInlineWidget() {
         <p class="footnote" id="context-note"></p>
         <div class="ide-quota-wrap" id="ide-quota-wrap"${surface?'':' hidden'}>
           <div class="heading quota-heading"><span data-i18n="group">Quota group</span><div class="toolbar"><button class="group-trigger" data-i18n-aria="group" aria-haspopup="listbox" aria-expanded="false">Quota ▾</button><div class="group-menu" role="listbox" data-i18n-aria="selectGroup" hidden></div><button class="refresh" data-i18n-aria="refresh" aria-label="Refresh quota" title="Refresh quota"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.8 6a5.1 5.1 0 1 0 .1 4M12.8 2.5V6H9.2"/></svg></button></div></div>
-          <div class="quota-details">${['five','week'].map(name=>`<section class="quota-section" data-i18n-aria="${name}" aria-label="${t(name)}"><div class="quota-title"><span>${svg(name)}<span data-i18n="${name}">${t(name)}</span></span><strong id="${name}-balance">—</strong><span class="dim" data-i18n="remaining">remaining</span></div><div class="track" role="progressbar" data-i18n-aria="${name}" id="${name}-track"><i id="${name}-fill"></i></div><dl><div><dt data-i18n="resetIn">Resets in</dt><dd class="reset" id="${name}-countdown">—</dd></div><div><dt data-i18n="resetTime">Reset time (UTC+8)</dt><dd id="${name}-reset">—</dd></div><div id="${name}-est-usd-row" hidden><dt data-i18n="estApiQuota">${t('estApiQuota')}</dt><dd id="${name}-est-usd">—</dd></div><div id="${name}-est-tok-row" hidden><dt data-i18n="estRemaining">${t('estRemaining')}</dt><dd class="reset" id="${name}-est-tok">—</dd></div></dl><p class="footnote" id="${name}-note">${t('loadingQuota')}</p></section>`).join('')}</div>
+          <div class="quota-details">${['five','week'].map(name=>`<section class="quota-section" data-i18n-aria="${name}" aria-label="${t(name)}"><div class="quota-title"><span>${svg(name)}<span data-i18n="${name}">${t(name)}</span></span><strong id="${name}-balance">—</strong><span class="dim" data-i18n="remaining">remaining</span></div><div class="track" role="progressbar" data-i18n-aria="${name}" id="${name}-track"><i id="${name}-fill"></i></div><dl><div><dt data-i18n="resetIn">Resets in</dt><dd class="reset" id="${name}-countdown">—</dd></div><div><dt data-i18n="resetTime">Reset time (UTC+8)</dt><dd id="${name}-reset">—</dd></div><div class="quota-est-row" id="${name}-est-usd-row" hidden><dt data-i18n="estApiQuota">${t('estApiQuota')}</dt><dd id="${name}-est-usd">—</dd></div><div class="quota-est-row" id="${name}-est-tok-row" hidden><dt data-i18n="estRemaining">${t('estRemaining')}</dt><dd id="${name}-est-tok">—</dd></div></dl><p class="footnote" id="${name}-note">${t('loadingQuota')}</p></section>`).join('')}</div>
         </div>
       </div>
     </section>`);
@@ -1128,7 +1161,7 @@ module.exports = function installAgPulseInlineWidget() {
   }
   function isModelActivelyGenerating(speed){
     const lt=speed?.liveTiming;
-    return Boolean(lt?.isRunning&&lt?.activeModelStartedAt&&!lt?.activeToolStartedAt);
+    return Boolean(lt?.isRunning&&(speed?.liveStream||(lt?.activeModelStartedAt&&!lt?.activeToolStartedAt)));
   }
   function resetStreamState(cid=null,reqs=-1){
     streamState={convo:cid,stepIdx:-1,baseBackendBytes:0,domBaseBytes:0,prevBytes:0,prevAt:0,liveTps:null,lastCompletedReqs:reqs};
@@ -1369,25 +1402,32 @@ module.exports = function installAgPulseInlineWidget() {
       nativeUsageStyle=document.createElement('style');
       nativeUsageStyle.id=NATIVE_USAGE_STYLE_ID;
       nativeUsageStyle.textContent=`
-        [data-ag-pulse-usage-popup="1"]{width:min(396px,calc(100vw - 24px))!important;max-height:min(460px,calc(100vh - 32px))!important;padding:10px 10px 8px!important;border-radius:12px!important;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+        [data-ag-pulse-usage-popup="1"]{width:min(412px,calc(100vw - 24px))!important;max-height:min(460px,calc(100vh - 32px))!important;padding:10px 10px 8px!important;border-radius:12px!important;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
         [data-ag-pulse-usage-popup="1"]>div>div:first-child{padding:0 2px 7px!important;font-size:11px!important;line-height:14px!important;font-weight:600!important;letter-spacing:.02em;opacity:.75}
         [data-ag-pulse-usage-popup="1"] .custom-scrollbar{gap:10px!important}
-        [data-ag-pulse-usage-popup="1"] [role="group"]:has([data-ag-pulse-has-est="1"]){display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px!important;align-items:stretch}
-        [data-ag-pulse-usage-popup="1"] [role="group"]:has([data-ag-pulse-has-est="1"])>[role="presentation"]{grid-column:1 / -1;padding:0 2px 1px!important;font-size:12px!important;line-height:16px!important;font-weight:600!important}
-        [data-ag-pulse-has-est="1"]{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;grid-template-rows:auto 1fr auto!important;align-items:start!important;gap:0 6px!important;padding:8px 10px 7px!important;border-radius:9px!important;background:var(--muted,rgba(128,128,128,.055))!important;border:1px solid var(--border,rgba(128,128,128,.12))!important;transition:background-color 150ms ease,border-color 150ms ease}
+        [data-ag-pulse-usage-popup="1"] [role="group"]:has([data-ag-pulse-has-est="1"]){display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px!important;align-items:stretch}
+        [data-ag-pulse-usage-popup="1"] [role="group"]:has([data-ag-pulse-has-est="1"])>[role="presentation"]{grid-column:1 / -1;padding:0 2px 2px!important;font-size:12px!important;line-height:16px!important;font-weight:600!important}
+        [data-ag-pulse-has-est="1"]{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;grid-template-rows:auto auto 1fr auto!important;align-items:start!important;gap:0 6px!important;padding:9px 11px 8px!important;border-radius:10px!important;background:var(--muted,rgba(128,128,128,.055))!important;border:1px solid var(--border,rgba(128,128,128,.12))!important;transition:background-color 150ms ease,border-color 150ms ease}
         [data-ag-pulse-has-est="1"]:nth-child(2):last-child{grid-column:1 / -1}
-        [data-ag-pulse-has-est="1"]>:nth-child(1){grid-column:1;grid-row:1;font-size:11.5px!important;line-height:16px!important;font-weight:500!important}
-        [data-ag-pulse-has-est="1"]>:nth-child(2){grid-column:2;grid-row:1;gap:4px!important;font-size:11.5px!important;line-height:16px!important;font-variant-numeric:tabular-nums}
-        [data-ag-pulse-has-est="1"]>:nth-child(2)>span:first-child{font-weight:550;color:var(--foreground,inherit)!important;opacity:.82}
-        [data-ag-pulse-has-est="1"]>:nth-child(2)>div{width:14px!important;height:14px!important}
-        [data-ag-pulse-has-est="1"]>.col-span-2{grid-column:1 / -1!important;grid-row:3!important;margin-top:6px!important;padding-top:5px!important;border-top:1px solid var(--border,rgba(128,128,128,.12))!important;font-size:10.5px!important;line-height:14px!important;opacity:.82;font-variant-numeric:tabular-nums}
-        [data-ag-pulse-quota-ext="est"]{grid-column:1 / -1;grid-row:2;display:flex;flex-direction:column;gap:2px;margin-top:6px;min-width:0;font-variant-numeric:tabular-nums}
-        [data-ag-pulse-quota-ext="est"] .ag-est-main{display:flex;align-items:baseline;gap:4px;line-height:21px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        [data-ag-pulse-quota-ext="est"] .ag-est-rem{font-size:16px;font-weight:620;letter-spacing:-.025em;color:var(--foreground,inherit)}
-        [data-ag-pulse-quota-ext="est"] .ag-est-tot{font-size:11px;font-weight:400;color:var(--muted-foreground,rgba(128,128,128,.85))}
-        [data-ag-pulse-quota-ext="est"] .ag-est-tok{font-size:11px;line-height:15px;color:var(--muted-foreground,rgba(128,128,128,.85));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        [data-ag-pulse-quota-ext="est"] .ag-est-pending{font-size:12.5px;font-weight:500;line-height:19px;color:var(--muted-foreground,rgba(128,128,128,.85));opacity:.85}
-        [data-ag-pulse-quota-ext="est"] .ag-est-pending-sub{font-size:10.5px;line-height:14px;color:var(--muted-foreground,rgba(128,128,128,.75));opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        [data-ag-pulse-has-est="1"]>:nth-child(1){grid-column:1;grid-row:1;align-self:baseline;font-size:11px!important;line-height:18px!important;font-weight:500!important;color:var(--muted-foreground,rgba(128,128,128,.9))!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        [data-ag-pulse-has-est="1"]>:nth-child(2){grid-column:2;grid-row:1;align-self:baseline;gap:0!important;font-variant-numeric:tabular-nums}
+        [data-ag-pulse-has-est="1"]>:nth-child(2)>span:first-child{font-size:15px!important;line-height:19px!important;font-weight:660!important;letter-spacing:-.025em;color:var(--foreground,inherit)!important;opacity:1!important}
+        [data-ag-pulse-has-est="1"][data-ag-pulse-quota-level="low"]>:nth-child(2)>span:first-child{color:#f59e0b!important}
+        [data-ag-pulse-has-est="1"][data-ag-pulse-quota-level="critical"]>:nth-child(2)>span:first-child{color:#ef4444!important}
+        [data-ag-pulse-has-est="1"]>:nth-child(2)>div{display:none!important}
+        [data-ag-pulse-quota-ext="bar"]{grid-column:1 / -1;grid-row:2;margin-top:7px}
+        [data-ag-pulse-quota-ext="bar"] .ag-rem-track{height:6px;width:100%;border-radius:999px;background:color-mix(in srgb,var(--foreground,#888) 14%,transparent);overflow:hidden}
+        [data-ag-pulse-quota-ext="bar"] .ag-rem-track[data-empty="1"]{background:color-mix(in srgb,#ef4444 18%,transparent)}
+        [data-ag-pulse-quota-ext="bar"] .ag-rem-fill{display:block;height:100%;width:0;border-radius:999px;background:#22c55e;transition:width 220ms cubic-bezier(.22,1,.36,1),background-color 180ms ease}
+        [data-ag-pulse-quota-ext="bar"] .ag-rem-fill[data-level="low"]{background:#f59e0b}
+        [data-ag-pulse-quota-ext="bar"] .ag-rem-fill[data-level="critical"]{background:#ef4444}
+        [data-ag-pulse-has-est="1"]>.col-span-2{grid-column:1 / -1!important;grid-row:3!important;margin-top:5px!important;padding-top:0!important;border-top:0!important;font-size:10.5px!important;line-height:14px!important;color:var(--muted-foreground,rgba(128,128,128,.85))!important;opacity:.76;font-variant-numeric:tabular-nums}
+        [data-ag-pulse-quota-ext="est"]{grid-column:1 / -1;grid-row:4;display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-top:8px;padding-top:6px;border-top:1px solid var(--border,rgba(128,128,128,.12));min-width:0;font-variant-numeric:tabular-nums}
+        [data-ag-pulse-quota-ext="est"] .ag-est-usd{display:inline-flex;align-items:baseline;gap:3px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;line-height:15px}
+        [data-ag-pulse-quota-ext="est"] .ag-est-rem{font-weight:550;color:color-mix(in srgb,var(--foreground,inherit) 76%,var(--muted-foreground,transparent))}
+        [data-ag-pulse-quota-ext="est"] .ag-est-tot{font-size:10.5px;font-weight:400;color:var(--muted-foreground,rgba(128,128,128,.85));opacity:.78}
+        [data-ag-pulse-quota-ext="est"] .ag-est-tok{font-size:10.5px;line-height:15px;color:var(--muted-foreground,rgba(128,128,128,.85));opacity:.78;white-space:nowrap;flex:none}
+        [data-ag-pulse-quota-ext="est"] .ag-est-pending{font-size:10.5px;font-weight:450;line-height:15px;color:var(--muted-foreground,rgba(128,128,128,.85));opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
         [data-ag-pulse-quota-ext="footer"]{position:relative;isolation:isolate;display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;margin-top:9px;padding:10px 8px 6px;border:0;border-top:1px solid var(--border,rgba(128,128,128,.16));border-radius:0 0 7px 7px;background:transparent;color:var(--muted-foreground,inherit);font:inherit;font-size:12px;font-weight:500;cursor:pointer;transition:color 140ms ease}
         [data-ag-pulse-quota-ext="footer"]::before{content:'';position:absolute;inset:4px 0 0;border-radius:7px;background:var(--secondary,rgba(128,128,128,.1));opacity:0;transform:scale(.95);transition:transform 190ms cubic-bezier(.22,1,.36,1),opacity 140ms ease;z-index:-1;pointer-events:none}
         [data-ag-pulse-quota-ext="footer"]:hover{color:var(--foreground,inherit)}
@@ -1395,7 +1435,7 @@ module.exports = function installAgPulseInlineWidget() {
         [data-ag-pulse-quota-ext="footer"]:active::before{transform:scale(.96);transition-duration:75ms}
         [data-ag-pulse-quota-ext="footer"] svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex:none;opacity:.7;transition:transform 190ms cubic-bezier(.22,1,.36,1),opacity 140ms ease}
         [data-ag-pulse-quota-ext="footer"]:hover svg{transform:translateX(3px);opacity:1}
-        @media(prefers-reduced-motion:reduce){[data-ag-pulse-usage-popup="1"],[data-ag-pulse-has-est="1"],[data-ag-pulse-quota-ext="footer"]::before,[data-ag-pulse-quota-ext="footer"] svg{transition:none}}
+        @media(prefers-reduced-motion:reduce){[data-ag-pulse-usage-popup="1"],[data-ag-pulse-has-est="1"],[data-ag-pulse-quota-ext="bar"] .ag-rem-fill,[data-ag-pulse-quota-ext="footer"]::before,[data-ag-pulse-quota-ext="footer"] svg{transition:none}}
       `;
       (document.head||document.documentElement).append(nativeUsageStyle);
     }
@@ -1453,11 +1493,40 @@ module.exports = function installAgPulseInlineWidget() {
       const matchWin=s=>/\b5\s*-?\s*h(?:our)?\b/i.test(s)?'5h':/\b(?:week(?:ly)?|7\s*-?\s*d(?:ay)?)\b/i.test(s)?'weekly':null;
       const winKey=matchWin(firstText)||matchWin(subText);
       const w=winKey?estGroup?.windows?.[winKey]:null;
+      let barWrap=row.querySelector('[data-ag-pulse-quota-ext="bar"]');
       let badge=row.querySelector('[data-ag-pulse-quota-ext="est"]');
       if(!w?.available){
+        if(barWrap)barWrap.remove();
         if(badge)badge.remove();
         row.removeAttribute('data-ag-pulse-has-est');
+        row.removeAttribute('data-ag-pulse-quota-level');
         continue;
+      }
+      let remFrac=typeof w.remaining==='number'&&Number.isFinite(w.remaining)?Math.max(0,Math.min(1,w.remaining)):null;
+      if(remFrac===null){
+        const pm=(row.children[1]?.textContent||'').match(/(\d+(?:\.\d+)?)\s*%/);
+        if(pm)remFrac=Math.max(0,Math.min(1,Number(pm[1])/100));
+      }
+      const level=remFrac!==null?(remFrac<0.05?'critical':remFrac<0.2?'low':'ok'):'ok';
+      if(row.getAttribute('data-ag-pulse-quota-level')!==level)row.setAttribute('data-ag-pulse-quota-level',level);
+      if(!barWrap){
+        barWrap=document.createElement('div');
+        barWrap.setAttribute('data-ag-pulse-quota-ext','bar');
+        const track=document.createElement('div');track.className='ag-rem-track';
+        const fill=document.createElement('i');fill.className='ag-rem-fill';
+        track.append(fill);barWrap.append(track);
+        row.append(barWrap);
+      }
+      const barSig=`${remFrac===null?'':Math.round(remFrac*1000)}|${level}`;
+      if(barWrap.dataset.sig!==barSig){
+        barWrap.dataset.sig=barSig;
+        const track=barWrap.firstElementChild,fill=track?.firstElementChild;
+        if(track&&fill){
+          if(remFrac===0)track.setAttribute('data-empty','1');else track.removeAttribute('data-empty');
+          fill.setAttribute('data-level',level);
+          fill.style.width=remFrac===null?'0%':`${(remFrac*100).toFixed(1)}%`;
+          fill.style.minWidth=remFrac!==null&&remFrac>0?'4px':'0';
+        }
       }
       if(!badge){
         badge=document.createElement('div');
@@ -1479,6 +1548,7 @@ module.exports = function installAgPulseInlineWidget() {
         titleStr=[usdTip,tokTip].filter(Boolean).join(' · ')+prior;
       }else{
         isPending=true;
+        titleStr=`${t('estWaiting')} · ${t('estWaitingSub')}`;
       }
       const sig=`${isPending?1:0}|${remUsd}|${totUsd}|${tokStr}|${language.language}`;
       if(badge.dataset.sig!==sig){
@@ -1486,24 +1556,22 @@ module.exports = function installAgPulseInlineWidget() {
         badge.replaceChildren();
         if(isPending){
           const p=document.createElement('span');p.className='ag-est-pending';p.textContent=t('estWaiting');
-          const sub=document.createElement('span');sub.className='ag-est-pending-sub';sub.textContent=t('estWaitingSub');
-          badge.append(p,sub);
+          badge.append(p);
         }else if(remUsd){
-          const main=document.createElement('div');main.className='ag-est-main';
-          const rem=document.createElement('strong');rem.className='ag-est-rem';rem.textContent=remUsd;
+          const usd=document.createElement('span');usd.className='ag-est-usd';
+          const rem=document.createElement('span');rem.className='ag-est-rem';rem.textContent=remUsd;
           const tot=document.createElement('span');tot.className='ag-est-tot';tot.textContent=totUsd;
-          main.append(rem,tot);
-          badge.append(main);
+          usd.append(rem,tot);
+          badge.append(usd);
           if(tokStr){
             const tk=document.createElement('span');tk.className='ag-est-tok';tk.textContent=tokStr;
             badge.append(tk);
           }
         }else if(tokStr){
-          const main=document.createElement('div');main.className='ag-est-main';
-          const rem=document.createElement('strong');rem.className='ag-est-rem';rem.textContent=`~${tokStr.replace(/ tok$/,'')}`;
-          const tot=document.createElement('span');tot.className='ag-est-tot';tot.textContent='tok';
-          main.append(rem,tot);
-          badge.append(main);
+          const usd=document.createElement('span');usd.className='ag-est-usd';
+          const rem=document.createElement('span');rem.className='ag-est-rem';rem.textContent=`~${tokStr}`;
+          usd.append(rem);
+          badge.append(usd);
         }
       }
       if(badge.title!==titleStr)badge.title=titleStr;
@@ -1553,6 +1621,7 @@ module.exports = function installAgPulseInlineWidget() {
     for(const el of document.querySelectorAll('[data-ag-pulse-quota-ext]'))el.remove();
     for(const el of document.querySelectorAll('[data-ag-pulse-usage-popup]'))el.removeAttribute('data-ag-pulse-usage-popup');
     for(const el of document.querySelectorAll('[data-ag-pulse-has-est]'))el.removeAttribute('data-ag-pulse-has-est');
+    for(const el of document.querySelectorAll('[data-ag-pulse-quota-level]'))el.removeAttribute('data-ag-pulse-quota-level');
     nativeUsageStyle?.remove();nativeUsageStyle=null;
   }
   function render(){
@@ -1701,7 +1770,7 @@ module.exports = function installAgPulseInlineWidget() {
     })();
     return request.promise;
   }
-  function refresh(force=false){
+  function refresh(force=false,opts={}){
     if(disposed)return;
     if(syncConversation())render();
     if(pending)return refreshRequest;
@@ -1709,9 +1778,41 @@ module.exports = function installAgPulseInlineWidget() {
     const conversation=conversationId();
     const epoch=requestEpoch;
     const current=()=>!disposed&&epoch===requestEpoch&&conversation===conversationId()&&conversation===lastConversation&&node?.isConnected;
+    const preferCached=!force&&opts.preferCached===true;
+    const sessionOnly=!force&&opts.sessionOnly===true&&Boolean(data&&(data.groups?.length||data.usage))&&Date.now()-lastFullFetch<30000;
+    const payload={conversationId:conversation,force};
+    if(preferCached)payload.preferCached=true;
+    if(sessionOnly)payload.sessionOnly=true;
     pending=true;lastFetch=Date.now();
     refreshRequest=(async()=>{
-      try{const result=await host().getMetrics({conversationId:conversation,force});if(!current())return;node.style.visibility=result.enabled===false?'hidden':'';if(result.enabled===false){hide();return;}if(!conversation||result.speed&&result.speed.conversationId!==conversation)result.speed=null;data=result;if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}if(Object.hasOwn(result,'theme')){themeController?.setHostTheme(result.theme);}render();}
+      try{
+        const result=await host().getMetrics(payload);
+        if(!current()||result?.superseded)return result;
+        if(result.enabled===false){node.style.visibility='hidden';hide();return result;}
+        node.style.visibility='';
+        let nextSpeed=result.speed||null;
+        if(!conversation||nextSpeed&&nextSpeed.conversationId!==conversation)nextSpeed=null;
+        if(nextSpeed&&conversation)cacheSpeed(conversation,nextSpeed);
+        if(result.partial===true&&data){
+          data={
+            ...data,
+            connection:result.connection||data.connection,
+            error:result.error??data.error,
+            sessionError:result.sessionError??null,
+            serverTime:result.serverTime||data.serverTime,
+            speed:nextSpeed??(preferCached?data.speed:null),
+            persistenceError:result.persistenceError??data.persistenceError,
+          };
+        }else{
+          lastFullFetch=Date.now();
+          result.speed=nextSpeed;
+          data=result;
+          if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}
+          if(Object.hasOwn(result,'theme')){themeController?.setHostTheme(result.theme);}
+        }
+        render();
+        return result;
+      }
       catch{if(current()&&data){data.connection='stale';data.error=t('reconnecting');render();}}
       finally{if(epoch===requestEpoch){pending=false;refreshRequest=null;}}
     })();
@@ -1722,7 +1823,7 @@ module.exports = function installAgPulseInlineWidget() {
       const tEl=record.target;
       if(tEl===node||node?.contains(tEl))return false;
       if(tEl instanceof Element&&(tEl.hasAttribute('data-ag-pulse-quota-ext')||tEl.closest('[data-ag-pulse-quota-ext]')))return false;
-      if(record.type==='attributes'&&['data-ag-pulse-usage-popup','data-ag-pulse-has-est'].includes(record.attributeName))return false;
+      if(record.type==='attributes'&&['data-ag-pulse-usage-popup','data-ag-pulse-has-est','data-ag-pulse-quota-level'].includes(record.attributeName))return false;
       return true;
     });
     if(relevant){
@@ -1737,9 +1838,9 @@ module.exports = function installAgPulseInlineWidget() {
   densityMedia.addEventListener('change',stopDensityMotion);
   restartSampleTimer();
   liveTimerId=setInterval(()=>{if(!disposed&&(cardName==='speed'||miniName==='speed')&&data?.speed?.liveTiming?.isRunning)updateLiveTiming();},200);
-  const timerId=setInterval(()=>{mount();fit();tick();position();syncNativeUsagePanel();if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:2200))refresh();},1000);
+  const timerId=setInterval(()=>{mount();fit();tick();position();syncNativeUsagePanel();if(conversationId()!==lastConversation){if(syncConversation())render();}else if(!switchTimer&&Date.now()-lastFetch>(document.hidden?10000:2200))refresh();},1000);
   window.__agPulseDispose=()=>{
-    disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;
+    disposed=true;requestEpoch++;pending=false;refreshRequest=null;clearTimeout(switchTimer);switchTimer=null;convoCache.clear();stopDensityMotion();densityFrame=null;densityProbe=null;
     cardAnim?.cancel();cardAnim=null;cardBodyAnim?.cancel();cardBodyAnim=null;miniAnim?.cancel();miniAnim=null;clearExitStage();
     clearInterval(timerId);clearInterval(sampleTimerId);clearInterval(liveTimerId);clearTimeout(hoverTimer);clearTimeout(openTimer);if(layoutFrame!==null)cancelAnimationFrame(layoutFrame);observer.disconnect();resizeObserver?.disconnect();themeController?.dispose();preferences.dispose();hide({immediate:true});usageDashboard?.dispose();disposeNativeUsagePanel();node?.remove();
     document.removeEventListener('keydown',onKey);document.removeEventListener('pointerdown',onPointer);

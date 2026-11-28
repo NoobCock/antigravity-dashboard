@@ -23,7 +23,10 @@ export function validTarget(target, port) {
 export function validatedInput(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid metrics request');
   if (value.conversationId != null && !GUID.test(value.conversationId)) throw new Error('Invalid conversation ID');
-  return { conversationId: value.conversationId || null, force: value.force === true };
+  const out = { conversationId: value.conversationId || null, force: value.force === true };
+  if (value.preferCached === true) out.preferCached = true;
+  if (value.sessionOnly === true) out.sessionOnly = true;
+  return out;
 }
 
 function jsonGet(port, path) {
@@ -97,14 +100,21 @@ function rendererBridge(binding) {
   if (window !== window.top) return;
   if (window.__agPulseRuntimeBridge && window.__agPulseRuntimeHost) return;
   window.__agPulseRuntimeBridge?.dispose();
-  const pending = new Map(); let sequence = 0;
+  const pending = new Map(); let sequence = 0, activeMetricsId = 0;
   const empty = () => ({ connection: 'offline', error: '等待 Antigrative Dashboard 重新连接', speed: null, groups: [], enabled: false });
+  const busy = () => ({ connection: 'stale', error: '等待 Antigrative Dashboard 重新连接', speed: null, groups: [] });
   const call = (type, input) => new Promise(resolve => {
-    if (pending.size >= 8) { resolve(empty()); return; }
+    if (type === 'metrics' && activeMetricsId && pending.has(activeMetricsId)) {
+      const prev = pending.get(activeMetricsId);
+      clearTimeout(prev.timer); pending.delete(activeMetricsId); activeMetricsId = 0;
+      prev.resolve({ superseded: true });
+    }
+    if (pending.size >= 16) { resolve(type === 'metrics' ? busy() : empty()); return; }
     const id = ++sequence;
-    const timer = setTimeout(() => { pending.delete(id); resolve(empty()); }, 15000);
-    pending.set(id, { resolve, timer });
-    try { window[binding](JSON.stringify({ id, type, input })); } catch { clearTimeout(timer); pending.delete(id); resolve(empty()); }
+    if (type === 'metrics') activeMetricsId = id;
+    const timer = setTimeout(() => { pending.delete(id); if (activeMetricsId === id) activeMetricsId = 0; resolve(type === 'metrics' ? busy() : empty()); }, 15000);
+    pending.set(id, { resolve, timer, type });
+    try { window[binding](JSON.stringify({ id, type, input })); } catch { clearTimeout(timer); pending.delete(id); if (activeMetricsId === id) activeMetricsId = 0; resolve(empty()); }
   });
   const host = {
     getMetrics: input => call('metrics', input),
@@ -118,9 +128,9 @@ function rendererBridge(binding) {
   };
   window.__agPulseRuntimeBridge = {
     binding,
-    resolve(id, result) { const item = pending.get(id); if (!item) return; clearTimeout(item.timer); pending.delete(id); item.resolve(result); },
-    reconnect() { for(const item of pending.values()){clearTimeout(item.timer);item.resolve({connection:'offline',error:'等待 Antigrative Dashboard 重新连接',speed:null,groups:[]});}pending.clear(); },
-    dispose() { for (const item of pending.values()) { clearTimeout(item.timer); item.resolve(empty()); } pending.clear(); delete window.__agPulseRuntimeBridge; delete window.__agPulseRuntimeHost; },
+    resolve(id, result) { const item = pending.get(id); if (!item) return; clearTimeout(item.timer); pending.delete(id); if (activeMetricsId === id) activeMetricsId = 0; item.resolve(result); },
+    reconnect() { activeMetricsId = 0; for(const item of pending.values()){clearTimeout(item.timer);item.resolve({connection:'offline',error:'等待 Antigrative Dashboard 重新连接',speed:null,groups:[]});}pending.clear(); },
+    dispose() { activeMetricsId = 0; for (const item of pending.values()) { clearTimeout(item.timer); item.resolve(empty()); } pending.clear(); delete window.__agPulseRuntimeBridge; delete window.__agPulseRuntimeHost; },
   };
   window.__agPulseRuntimeHost = host;
   if (!window.agPulseHost) window.agPulseHost = host;
@@ -182,13 +192,22 @@ export class RuntimeUi {
     if (message.method === 'Runtime.executionContextsCleared') { connection.contexts.clear();connection.contextCandidates.clear();connection.mounted=false;return; }
     if (message.method === 'Runtime.executionContextDestroyed') { connection.contexts.delete(p.executionContextId);connection.contextCandidates.delete(p.executionContextId);return; }
     if (message.method !== 'Runtime.bindingCalled' || p.name !== this.binding || !connection.contexts.has(p.executionContextId)) return;
-    if (typeof p.payload !== 'string' || p.payload.length > 4096 || connection.inflight >= 8) return;
+    if (typeof p.payload !== 'string' || p.payload.length > 4096) return;
     let input;
     try { input = JSON.parse(p.payload); if (!Number.isSafeInteger(input.id) || input.id < 1) return; } catch { return; }
+    const isMetrics = input.type === 'metrics';
+    if ((!isMetrics && connection.inflight >= 8) || connection.inflight >= 24) return;
+    let metricsController = null;
+    if (isMetrics) {
+      connection.metricsAbort?.abort();
+      metricsController = new AbortController();
+      connection.metricsAbort = metricsController;
+      connection.latestMetricsId = input.id;
+    }
     connection.inflight++;
     try {
       let result = {};
-      if (input.type === 'metrics') result = await this.enabled() ? await this.snapshot(validatedInput(input.input)) : { ...offline('Antigrative Dashboard 已停用'), enabled: false };
+      if (isMetrics) result = await this.enabled() ? await this.snapshot(validatedInput(input.input), { signal: metricsController.signal }) : { ...offline('Antigrative Dashboard 已停用'), enabled: false };
       else if (input.type === 'preferences' && this.preferences) {
         const value=input.input;
         if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!['language','languageGuideDismissed','usageGuideDismissed'].includes(key)))throw new Error('Invalid preferences request');
@@ -215,21 +234,29 @@ export class RuntimeUi {
       else if (input.type === 'diagnostic' && ['boot', 'mounted', 'mount-error'].includes(input.input?.stage)) {
         if (input.input.stage === 'mounted' && input.input.editorFound && input.input.composerFound) connection.mounted = true;
       } else return;
+      if (isMetrics && input.id !== connection.latestMetricsId) return;
       if (JSON.stringify(result).length > 1048576) result = offline('Metrics response too large');
       if(this.stopping||!await this.owns())return;
       await connection.command('Runtime.evaluate', { expression: this.rendererGuard('window.__agPulseRuntimeBridge?.resolve(' + input.id + ',' + JSON.stringify(result) + ')'), contextId: p.executionContextId });
-    } catch {
+    } catch (error) {
+      if (isMetrics && (error?.name === 'AbortError' || input.id !== connection.latestMetricsId)) return;
       const failure=input.type==='preferences'?{error:'Language preference could not be saved or read'}:input.type==='pricing'?{ok:false,error:'Pricing could not be updated'}:input.type==='update'?{ok:false,error:'Update check failed'}:offline('等待 Antigrative Dashboard 重新连接');
       if(this.stopping||!await this.owns())return;
       try { await connection.command('Runtime.evaluate', { expression: this.rendererGuard('window.__agPulseRuntimeBridge?.resolve(' + input.id + ',' + JSON.stringify(failure) + ')'), contextId: p.executionContextId }); } catch { /* The next poll reconnects. */ }
-    } finally { connection.inflight--; }
+    } finally {
+      connection.inflight--;
+      if (metricsController && connection.metricsAbort === metricsController) connection.metricsAbort = null;
+    }
   }
   rendererGuard(expression){return this.owner?'if(window.__agPulseRuntimeOwner==='+JSON.stringify(this.owner)+'){'+expression+'}':expression;}
   async attach(target) {
     let connection;
-    connection = this.connect(target.webSocketDebuggerUrl, { onEvent: message => { void this.event(connection, message); } });
+    connection = this.connect(target.webSocketDebuggerUrl, {
+      onEvent: message => { void this.event(connection, message); },
+      onClose: () => { connection?.metricsAbort?.abort(); connection.metricsAbort = null; },
+    });
     connection.origin = this.targetOrigin(target);
-    connection.contexts = new Set();connection.contextCandidates=new Map(); connection.inflight = 0; connection.mounted = false;
+    connection.contexts = new Set();connection.contextCandidates=new Map(); connection.inflight = 0; connection.mounted = false; connection.latestMetricsId = 0; connection.metricsAbort = null;
     try {
       await connection.open();
       if(this.stopping||!await this.owns())throw new Error('Sidecar ownership changed');

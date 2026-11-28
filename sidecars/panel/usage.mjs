@@ -12,9 +12,17 @@ const cleanModel=value=>String(value||'Unknown').replace(/[\x00-\x1f\x7f]/g,'').
 const stamp=value=>typeof value==='string'&&/^20\d\d-\d\d-\d\dT/.test(value)&&Number.isFinite(Date.parse(value))?Date.parse(value):null;
 const sum=r=>keys.reduce((n,k)=>n+(r[k]??0),0);
 const roundUsd=n=>Number((Number.isFinite(n)?n:0).toFixed(4));
+const dateFormatters=new Map();
 export function dateKey(time,zone='Asia/Shanghai'){
-  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(time);
-  const get=key=>parts.find(p=>p.type===key).value;return `${get('year')}-${get('month')}-${get('day')}`;
+  if(zone==='Asia/Shanghai'&&typeof time==='number'&&Number.isFinite(time)&&time>=946684800000){
+    return new Date(time+28800000).toISOString().slice(0,10);
+  }
+  let fmt=dateFormatters.get(zone);
+  if(!fmt){
+    fmt=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'});
+    dateFormatters.set(zone,fmt);
+  }
+  return fmt.format(time);
 }
 export function usageRecords(raw,conversationId){
   const trajectory=raw?.trajectory||{},rows=new Map(),steps=trajectory.steps||[];
@@ -43,7 +51,7 @@ const validRow=r=>r&&HASH.test(r.id)&&typeof r.model==='string'&&r.model.length<
   (r.at===null||Number.isSafeInteger(r.at)&&r.at>=0)&&keys.every(k=>r[k]===null||Number.isSafeInteger(r[k])&&r[k]>=0);
 export class UsageLedger{
   constructor(directory=join(platformPaths().data,'usage-v1'),{timeZone='Asia/Shanghai',source='desktop-local'}={}){this.directory=directory;this.timeZone=timeZone;this.source=source;}
-  queue=Promise.resolve();revision=0;cache=null;recordsCache=null;
+  queue=Promise.resolve();revision=0;cache=null;recordsCache=null;fileCache=new Map();ingestMarks=new Map();
   file(scope,id){if(!HASH.test(scope)||!GUID.test(id))throw Error('Invalid usage scope');return join(this.directory,scope,hash(id.toLowerCase())+'.json');}
   async hasSynced(scope,id,modifiedAt){
     if(!scope||!HASH.test(scope)||!GUID.test(id))return false;
@@ -56,16 +64,23 @@ export class UsageLedger{
   ingest(scope,id,raw){
     if(!scope)return Promise.resolve();
     const rows=usageRecords(raw,id),file=this.file(scope,id);
+    const markKey=`${scope}:${id.toLowerCase()}`;
+    let totalSum=0,atSum=0,undated=0,partialCount=0;
+    for(const r of rows){totalSum+=sum(r);if(r.at===null)undated++;else atSum+=r.at;if(r.partial)partialCount++;}
+    const mark=`${rows.length}:${rows[0]?.id||''}:${rows.at(-1)?.id||''}:${totalSum}:${atSum}:${undated}:${partialCount}`;
+    if(this.ingestMarks.get(markKey)===mark)return Promise.resolve();
     const pending=this.queue.catch(()=>{}).then(async()=>{
       let previous;try{previous=JSON.parse(await readFile(file,'utf8'));}catch(e){if(e.code!=='ENOENT')throw Error('Usage ledger cannot be read');}
       if(previous&&(previous.schema!==1||previous.account!==scope||!Array.isArray(previous.records)||!previous.records.every(validRow)))throw Error('Invalid usage ledger');
       const merged=new Map((previous?.records||[]).map(r=>[r.id,r]));
       for(const row of rows){const old=merged.get(row.id),record={...row,at:row.at??old?.at??null,timeBasis:row.at===null&&old?.at!==null&&old?.at!==undefined?old.timeBasis:row.timeBasis};for(const key of keys)record[key]=row[key]??old?.[key]??null;merged.set(row.id,record);}
       const records=[...merged.values()].sort((a,b)=>a.id.localeCompare(b.id));
-      if(previous&&JSON.stringify(previous.records)===JSON.stringify(records))return;
+      if(previous&&JSON.stringify(previous.records)===JSON.stringify(records)){this.ingestMarks.set(markKey,mark);return;}
       await mkdir(join(this.directory,scope),{recursive:true});const temp=file+'.'+randomUUID()+'.tmp';
       try{await writeFile(temp,JSON.stringify({schema:1,account:scope,records}),{mode:0o600});await rename(temp,file);}
       catch(e){await unlink(temp).catch(()=>{});throw e;}
+      try{const info=await stat(file);this.fileCache.set(file,{mtimeMs:info.mtimeMs,ctimeMs:info.ctimeMs,size:info.size,records});}catch{this.fileCache.delete(file);}
+      this.ingestMarks.set(markKey,mark);
       this.revision++;this.cache=null;this.recordsCache=null;
     });this.queue=pending;return pending;
   }
@@ -74,13 +89,32 @@ export class UsageLedger{
     if(!scope||!HASH.test(scope))return null;
     if(this.recordsCache?.scope===scope&&this.recordsCache.revision===this.revision)return this.recordsCache.value;
     const seen=new Map();let unreadable=0;
-    let files=[];try{files=await readdir(join(this.directory,scope));}catch(e){if(e.code!=='ENOENT')throw e;}
-    for(const name of files.filter(name=>/^[a-f0-9]{64}\.json$/.test(name))){
-      try{
-        const text=await readFile(join(this.directory,scope,name),'utf8');if(text.length>16*1024*1024)throw Error('Ledger too large');
-        const record=JSON.parse(text);if(record.schema!==1||record.account!==scope||!Array.isArray(record.records)||!record.records.every(validRow))throw Error('Invalid ledger');
-        for(const r of record.records){const previous=seen.get(r.id);if(!previous||sum(r)>sum(previous))seen.set(r.id,r);}
-      }catch{unreadable++;}
+    const scopeDir=join(this.directory,scope);
+    let files=[];try{files=await readdir(scopeDir);}catch(e){if(e.code!=='ENOENT')throw e;}
+    const validNames=files.filter(name=>/^[a-f0-9]{64}\.json$/.test(name));
+    const activePaths=new Set(validNames.map(name=>join(scopeDir,name)));
+    for(const key of this.fileCache.keys())if(key.startsWith(scopeDir)&&!activePaths.has(key))this.fileCache.delete(key);
+    const parsedFiles=[];
+    for(let i=0;i<validNames.length;i+=32){
+      const batch=validNames.slice(i,i+32);
+      const loaded=await Promise.all(batch.map(async name=>{
+        const full=join(scopeDir,name);
+        try{
+          const info=await stat(full);
+          const cached=this.fileCache.get(full);
+          if(cached&&cached.mtimeMs===info.mtimeMs&&cached.ctimeMs===info.ctimeMs&&cached.size===info.size)return cached.records;
+          if(info.size>16*1024*1024)throw Error('Ledger too large');
+          const text=await readFile(full,'utf8');if(text.length>16*1024*1024)throw Error('Ledger too large');
+          const record=JSON.parse(text);if(record.schema!==1||record.account!==scope||!Array.isArray(record.records)||!record.records.every(validRow))throw Error('Invalid ledger');
+          this.fileCache.set(full,{mtimeMs:info.mtimeMs,ctimeMs:info.ctimeMs,size:info.size,records:record.records});
+          return record.records;
+        }catch{this.fileCache.delete(full);return null;}
+      }));
+      parsedFiles.push(...loaded);
+    }
+    for(const list of parsedFiles){
+      if(!list){unreadable++;continue;}
+      for(const r of list){const previous=seen.get(r.id);if(!previous||sum(r)>sum(previous))seen.set(r.id,r);}
     }
     const value={records:[...seen.values()],unreadableFiles:unreadable};
     this.recordsCache={scope,revision:this.revision,value};return value;

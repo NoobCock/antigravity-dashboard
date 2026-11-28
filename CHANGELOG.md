@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.1 — 2026-11-28
+
+- Fix live timing and streaming TPS during model thinking (`CORTEX_STEP_STATUS_GENERATING`) being misclassified as `Tool time` due to historical `CLEARED` tool steps lacking `completedAt`, queued pre-execution tool calls, or concurrent background commands.
+- Reorder Usage Limit cards across the built-in `View Usage` popup, side panel, and IDE context card so remaining percentage and a full-width semantic progress bar lead the visual hierarchy while estimated equivalent API budget and remaining tokens sit cleanly below.
+- Accelerate Session info loading during rapid conversation switching via client-side per-conversation LRU caching, debounced lightweight `sessionOnly`/`preferCached` updates, request superseding with `AbortSignal` cancellation, parallel step/metadata fetching, idle history freshness checks, cached `dateKey`/file-stat usage aggregation, and memoized quota estimation.
+
 ## 0.10.0 — 2026-11-28
 
 - Redesign the TPS indicator as a dynamic SVG line chart with customizable sampling intervals (`0.5s / 1s / 2s / 5s`), live-ticking `Model time` and `Tool time`, and real-time generation throughput tracking across thinking, response, and tool-call output without synthetic flatlines when idle.

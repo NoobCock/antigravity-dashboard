@@ -266,57 +266,107 @@ export function trajectoryMetrics(response) {
   const streamingSeconds = accepted.reduce((sum, s) => sum + s.duration, 0);
   const sampledTokens = accepted.reduce((sum, s) => sum + s.responseTokens, 0);
   const basisSamples = accepted.length ? accepted : samples;
-  const tools = steps.filter(s => /SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type || '')) || s.metadata?.toolCall);
+  const PLANNER_STEP_RE = /PLANNER_RESPONSE/i;
+  const TOOL_STEP_RE = /SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i;
+  const ACTIVE_PLANNER_STATUS_RE = /RUNNING|IN_PROGRESS|GENERATING|STREAMING|PENDING/i;
+  const ACTIVE_TOOL_STATUS_RE = /RUNNING|EXECUTING|IN_PROGRESS/i;
+  const SETTLED_STEP_STATUS_RE = /DONE|COMPLETED|CLEARED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR|SKIPPED/i;
+  const isPlannerStep = s => PLANNER_STEP_RE.test(String(s?.type || ''));
+  const isToolStep = s => !isPlannerStep(s) && (TOOL_STEP_RE.test(String(s?.type || '')) || Boolean(s?.metadata?.toolCall));
+  const tools = steps.filter(isToolStep);
   const completedToolIntervals = tools.map(s => [Date.parse(s.metadata?.startedAt || s.metadata?.createdAt), Date.parse(s.metadata?.completedAt)]);
   const toolSeconds = unionSeconds(completedToolIntervals);
   const isRunning = /RUNNING|EXECUTING|IN_PROGRESS/i.test(String(response.status || ''));
   let activeToolStartedAt = null, activeModelStartedAt = null, liveStream = null;
   if (isRunning) {
-    const maxCompletedToolEnd = completedToolIntervals.reduce((max, [, end]) => Number.isFinite(end) ? Math.max(max, end) : max, 0);
-    const activeToolStarts = tools
-      .filter(s => !Number.isFinite(Date.parse(s.metadata?.completedAt || '')))
-      .map(s => Date.parse(s.metadata?.startedAt || s.metadata?.createdAt || ''))
-      .filter(Number.isFinite);
-    if (activeToolStarts.length) {
-      const startMs = Math.max(Math.min(...activeToolStarts), maxCompletedToolEnd);
-      activeToolStartedAt = new Date(startMs).toISOString();
-    } else {
-      let lastGenStep = -1;
-      for (const g of generators) {
-        if (!g?.chatModel?.usage) continue;
-        for (const idx of g.stepIndices || []) {
-          if (Number.isInteger(idx) && idx > lastGenStep) lastGenStep = idx;
-        }
+    let lastGenStep = -1;
+    for (const g of generators) {
+      if (!g?.chatModel?.usage) continue;
+      for (const idx of g.stepIndices || []) {
+        if (Number.isInteger(idx) && idx > lastGenStep) lastGenStep = idx;
       }
-      let modelStartMs = NaN;
-      for (let i = steps.length - 1; i >= 0; i--) {
-        const s = steps[i];
-        if (/PLANNER_RESPONSE/.test(String(s?.type || ''))) {
-          if (i > lastGenStep) {
-            const ts = Date.parse(s.metadata?.startedAt || s.metadata?.createdAt || '');
-            if (Number.isFinite(ts)) modelStartMs = ts;
-            if (/RUNNING|IN_PROGRESS/i.test(String(s?.status || ''))) {
-              const bytes = plannerStreamBytes(s.plannerResponse);
-              const streamStart = s.metadata?.viewableAt || s.metadata?.createdAt || null;
-              liveStream = {
-                stepIndex: i,
-                startedAt: streamStart && Number.isFinite(Date.parse(streamStart)) ? new Date(streamStart).toISOString() : null,
-                bytes,
-                hasFirstToken: Boolean(s.metadata?.viewableAt || bytes > 0),
-              };
-            }
-          }
-          break;
-        }
+    }
+    let lastUserInputStep = -1;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      if (/USER_INPUT/i.test(String(steps[i]?.type || ''))) { lastUserInputStep = i; break; }
+    }
+    // Active model thinking/generation always takes precedence over concurrent
+    // background tools or queued tool calls created mid-stream.
+    let activePlannerIdx = -1;
+    for (let i = steps.length - 1; i > lastUserInputStep; i--) {
+      const s = steps[i];
+      if (!isPlannerStep(s)) continue;
+      const statusStr = String(s?.status || '');
+      const finishedMs = Date.parse(s?.metadata?.finishedGeneratingAt || '');
+      const completedMs = Date.parse(s?.metadata?.completedAt || '');
+      if (ACTIVE_PLANNER_STATUS_RE.test(statusStr) && !Number.isFinite(finishedMs) && !Number.isFinite(completedMs)) {
+        activePlannerIdx = i;
       }
+      break;
+    }
+    if (activePlannerIdx >= 0) {
+      const s = steps[activePlannerIdx];
+      let modelStartMs = Date.parse(s.metadata?.createdAt || s.metadata?.startedAt || s.metadata?.viewableAt || '');
       if (!Number.isFinite(modelStartMs)) {
-        for (let i = steps.length - 1; i >= 0; i--) {
-          const s = steps[i];
-          const ts = Date.parse(s?.metadata?.completedAt || s?.metadata?.startedAt || s?.metadata?.createdAt || '');
+        for (let j = activePlannerIdx - 1; j > lastUserInputStep; j--) {
+          const prev = steps[j];
+          const ts = Date.parse(prev?.metadata?.completedAt || prev?.metadata?.finishedGeneratingAt || prev?.metadata?.startedAt || prev?.metadata?.createdAt || '');
           if (Number.isFinite(ts)) { modelStartMs = ts; break; }
         }
       }
       if (Number.isFinite(modelStartMs)) activeModelStartedAt = new Date(modelStartMs).toISOString();
+      const bytes = plannerStreamBytes(s.plannerResponse);
+      const streamStart = s.metadata?.viewableAt || s.metadata?.createdAt || null;
+      liveStream = {
+        stepIndex: activePlannerIdx,
+        startedAt: streamStart && Number.isFinite(Date.parse(streamStart)) ? new Date(streamStart).toISOString() : null,
+        bytes,
+        hasFirstToken: Boolean(s.metadata?.viewableAt || bytes > 0),
+      };
+    } else {
+      const maxCompletedToolEnd = completedToolIntervals.reduce((max, [, end]) => Number.isFinite(end) ? Math.max(max, end) : max, 0);
+      const activeToolStarts = [];
+      for (let i = lastUserInputStep + 1; i < steps.length; i++) {
+        const s = steps[i];
+        if (!isToolStep(s)) continue;
+        if (Number.isFinite(Date.parse(s.metadata?.completedAt || ''))) continue;
+        const statusStr = String(s.status || '');
+        if (SETTLED_STEP_STATUS_RE.test(statusStr)) continue;
+        const startedMs = Date.parse(s.metadata?.startedAt || '');
+        const createdMs = Date.parse(s.metadata?.createdAt || '');
+        if (Number.isFinite(startedMs)) {
+          activeToolStarts.push(startedMs);
+        } else if (ACTIVE_TOOL_STATUS_RE.test(statusStr) && Number.isFinite(createdMs)) {
+          activeToolStarts.push(createdMs);
+        }
+      }
+      if (activeToolStarts.length) {
+        const startMs = Math.max(Math.min(...activeToolStarts), maxCompletedToolEnd);
+        activeToolStartedAt = new Date(startMs).toISOString();
+      } else {
+        let modelStartMs = NaN;
+        for (let i = steps.length - 1; i > lastUserInputStep; i--) {
+          const s = steps[i];
+          if (!isPlannerStep(s)) continue;
+          const statusStr = String(s?.status || '');
+          const plannerSettled = SETTLED_STEP_STATUS_RE.test(statusStr)
+            || Number.isFinite(Date.parse(s?.metadata?.finishedGeneratingAt || ''))
+            || Number.isFinite(Date.parse(s?.metadata?.completedAt || ''));
+          if (i > lastGenStep && !plannerSettled) {
+            const ts = Date.parse(s.metadata?.createdAt || s.metadata?.startedAt || s.metadata?.viewableAt || '');
+            if (Number.isFinite(ts)) modelStartMs = ts;
+          }
+          break;
+        }
+        if (!Number.isFinite(modelStartMs)) {
+          for (let i = steps.length - 1; i > lastUserInputStep; i--) {
+            const s = steps[i];
+            const ts = Date.parse(s?.metadata?.completedAt || s?.metadata?.finishedGeneratingAt || s?.metadata?.startedAt || s?.metadata?.createdAt || '');
+            if (Number.isFinite(ts)) { modelStartMs = ts; break; }
+          }
+        }
+        if (Number.isFinite(modelStartMs)) activeModelStartedAt = new Date(modelStartMs).toISOString();
+      }
     }
   }
   const outputSamples = samples.filter(s => typeof s.outputTps === 'number' && Number.isFinite(s.outputTps) && s.outputTps > 0 && s.outputTps < 2000 && !s.reasons.includes('duplicate-scope') && !s.reasons.includes('retry-scope') && !s.reasons.includes('token-scope'));

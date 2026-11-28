@@ -96,3 +96,125 @@ test('liveTiming tracks active tool and active model starts without double-count
   assert.equal(idle.liveTiming.activeToolStartedAt, null);
   assert.equal(idle.liveTiming.activeModelStartedAt, null);
 });
+
+test('thinking PLANNER_RESPONSE (GENERATING) counts as Model time with liveStream even with cleared/queued/background tools', () => {
+  // 1. Active thinking PLANNER_RESPONSE + historical CLEARED tools without completedAt
+  const thinkingWithCleared = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+        { type: 'CORTEX_STEP_TYPE_GENERIC', status: 'CORTEX_STEP_STATUS_CLEARED', metadata: { createdAt: '2026-11-24T11:10:28Z', startedAt: '2026-11-24T11:10:51Z', toolCall: true } },
+        { type: 'CORTEX_STEP_TYPE_RUN_COMMAND', status: 'CORTEX_STEP_STATUS_DONE', metadata: { startedAt: '2026-11-28T05:37:14Z', completedAt: '2026-11-28T05:37:18Z', toolCall: true } },
+        {
+          type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+          status: 'CORTEX_STEP_STATUS_GENERATING',
+          metadata: { createdAt: '2026-11-28T05:37:19Z', viewableAt: '2026-11-28T05:37:26Z' },
+          plannerResponse: { thinking: 'Reasoning about shader startup pipeline...', response: '', toolCalls: [] },
+        },
+      ],
+      generatorMetadata: [],
+    },
+  });
+  assert.equal(thinkingWithCleared.liveTiming.isRunning, true);
+  assert.equal(thinkingWithCleared.liveTiming.activeModelStartedAt, '2026-11-28T05:37:19.000Z');
+  assert.equal(thinkingWithCleared.liveTiming.activeToolStartedAt, null);
+  assert.equal(thinkingWithCleared.liveStream?.stepIndex, 3);
+  assert.equal(thinkingWithCleared.liveStream?.startedAt, '2026-11-28T05:37:26.000Z');
+  assert.ok(thinkingWithCleared.liveStream?.bytes > 20);
+  assert.equal(thinkingWithCleared.liveStream?.hasFirstToken, true);
+
+  // 2. Brief gap right after a completed tool before next PLANNER_RESPONSE exists, with CLEARED tool in same turn
+  const postToolGapWithCleared = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+        { type: 'CORTEX_STEP_TYPE_GENERIC', status: 'CORTEX_STEP_STATUS_CLEARED', metadata: { createdAt: '2026-11-28T05:30:00Z', startedAt: '2026-11-28T05:30:01Z', toolCall: true } },
+        { type: 'CORTEX_STEP_TYPE_RUN_COMMAND', status: 'CORTEX_STEP_STATUS_DONE', metadata: { startedAt: '2026-11-28T05:37:14Z', completedAt: '2026-11-28T05:37:18Z', toolCall: true } },
+      ],
+      generatorMetadata: [],
+    },
+  });
+  assert.equal(postToolGapWithCleared.liveTiming.activeToolStartedAt, null);
+  assert.equal(postToolGapWithCleared.liveTiming.activeModelStartedAt, '2026-11-28T05:37:18.000Z');
+
+  // 3. Queued tool step created mid-stream (createdAt only, no startedAt) while PLANNER_RESPONSE is GENERATING
+  const queuedToolMidStream = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+        {
+          type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+          status: 'CORTEX_STEP_STATUS_GENERATING',
+          metadata: { createdAt: '2026-11-28T05:36:53Z', viewableAt: '2026-11-28T05:37:06Z' },
+          plannerResponse: { thinking: 'Calling tools...', response: '', toolCalls: [{ name: 'mcp_tool' }] },
+        },
+        { type: 'CORTEX_STEP_TYPE_MCP_TOOL', status: 'CORTEX_STEP_STATUS_PENDING', metadata: { createdAt: '2026-11-28T05:37:09Z', toolCall: true } },
+      ],
+      generatorMetadata: [],
+    },
+  });
+  assert.equal(queuedToolMidStream.liveTiming.activeToolStartedAt, null);
+  assert.equal(queuedToolMidStream.liveTiming.activeModelStartedAt, '2026-11-28T05:36:53.000Z');
+  assert.equal(queuedToolMidStream.liveStream?.stepIndex, 1);
+
+  // 4. Concurrent background RUN_COMMAND while newer PLANNER_RESPONSE is actively thinking
+  const bgToolPlusThinking = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+        { type: 'CORTEX_STEP_TYPE_RUN_COMMAND', status: 'CORTEX_STEP_STATUS_RUNNING', metadata: { startedAt: '2026-11-28T05:32:20Z', toolCall: true } },
+        {
+          type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+          status: 'CORTEX_STEP_STATUS_GENERATING',
+          metadata: { createdAt: '2026-11-28T05:32:33Z', viewableAt: '2026-11-28T05:32:41Z' },
+          plannerResponse: { thinking: 'Continuing analysis while command runs in background', response: '' },
+        },
+      ],
+      generatorMetadata: [],
+    },
+  });
+  assert.equal(bgToolPlusThinking.liveTiming.activeModelStartedAt, '2026-11-28T05:32:33.000Z');
+  assert.equal(bgToolPlusThinking.liveTiming.activeToolStartedAt, null);
+  assert.equal(bgToolPlusThinking.liveStream?.stepIndex, 2);
+
+  // Once that PLANNER_RESPONSE finishes and the turn waits on the background RUN_COMMAND, Tool time resumes
+  const waitingOnBgTool = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+        { type: 'CORTEX_STEP_TYPE_RUN_COMMAND', status: 'CORTEX_STEP_STATUS_RUNNING', metadata: { startedAt: '2026-11-28T05:32:20Z', toolCall: true } },
+        {
+          type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+          status: 'CORTEX_STEP_STATUS_DONE',
+          metadata: { createdAt: '2026-11-28T05:32:33Z', viewableAt: '2026-11-28T05:32:41Z', finishedGeneratingAt: '2026-11-28T05:32:53Z' },
+          plannerResponse: { thinking: 'Done thinking', response: 'Waiting for command' },
+        },
+      ],
+      generatorMetadata: [],
+    },
+  });
+  assert.equal(waitingOnBgTool.liveTiming.activeToolStartedAt, '2026-11-28T05:32:20.000Z');
+  assert.equal(waitingOnBgTool.liveTiming.activeModelStartedAt, null);
+  assert.equal(waitingOnBgTool.liveStream, null);
+
+  // 5. Running daemon from a previous user turn does not hijack a brand new user turn before PLANNER_RESPONSE appears
+  const prevTurnDaemon = trajectoryMetrics({
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    trajectory: {
+      steps: [
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+        { type: 'CORTEX_STEP_TYPE_RUN_COMMAND', status: 'CORTEX_STEP_STATUS_RUNNING', metadata: { startedAt: '2026-11-28T04:00:00Z', toolCall: true } },
+        { type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: '2026-11-28T04:00:05Z', finishedGeneratingAt: '2026-11-28T04:00:10Z' } },
+        { type: 'CORTEX_STEP_TYPE_USER_INPUT' },
+      ],
+      generatorMetadata: [],
+    },
+  });
+  assert.equal(prevTurnDaemon.liveTiming.activeToolStartedAt, null);
+  assert.equal(prevTurnDaemon.liveTiming.activeModelStartedAt, null);
+});

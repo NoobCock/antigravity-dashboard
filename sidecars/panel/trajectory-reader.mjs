@@ -1,8 +1,11 @@
 // Statistics-only acquisition. Host schemas accept offsets, not page sizes.
 // Cached immutable prefixes are local numeric/structural projections only.
 const settled=s=>/IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/.test(String(s||''));
-const settledCheckpoint=s=>/DONE|COMPLETED|CLEARED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/i.test(String(s||''));
-const pendingCheckpoint=s=>/CHECKPOINT/i.test(String(s?.type||''))&&(s?.status?!settledCheckpoint(s.status):Boolean((s?.metadata?.startedAt||s?.metadata?.createdAt)&&!s?.metadata?.completedAt));
+const settledStep=s=>/DONE|COMPLETED|CLEARED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR|SKIPPED/i.test(String(s||''));
+const pendingCheckpoint=s=>/CHECKPOINT/i.test(String(s?.type||''))&&(s?.status?!settledStep(s.status):Boolean((s?.metadata?.startedAt||s?.metadata?.createdAt)&&!s?.metadata?.completedAt));
+const pendingPlanner=s=>/PLANNER_RESPONSE/i.test(String(s?.type||''))&&/RUNNING|IN_PROGRESS|GENERATING|STREAMING|PENDING/i.test(String(s?.status||''))&&!s?.metadata?.finishedGeneratingAt&&!s?.metadata?.completedAt;
+const pendingTool=s=>!/PLANNER_RESPONSE/i.test(String(s?.type||''))&&!settledStep(s?.status)&&Boolean(s?.metadata&&(s.metadata.startedAt||s.metadata.createdAt)&&!s.metadata.completedAt&&
+ (/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type||''))||s.metadata.toolCall));
 const GUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const unavailable=()=>new Error('后台已重新连接，请等待刷新');
 export class TrajectoryReader {
@@ -31,13 +34,36 @@ export class TrajectoryReader {
   }
   return s;
  }
- async read(id,{summary:provided,force=false}={}){
+ async read(id,{summary:provided,force=false,signal=null}={}){
+  if(signal?.aborted){const err=new Error('请求已取消');err.name='AbortError';throw err;}
   const endpoint=await this.client.discover();
   if(!this.endpoint||['pid','port','csrf'].some(k=>this.endpoint[k]!==endpoint[k])){this.reset();this.endpoint=endpoint;}
-  let entry=this.entries.get(id);if(entry?.pending)return entry.pending;
+  let entry=this.entries.get(id);
+  const attachWaiter=(target,sig)=>{
+    target.waiters=(target.waiters||0)+1;
+    let released=false;
+    const release=()=>{
+      if(released)return;released=true;
+      target.waiters=Math.max(0,(target.waiters||1)-1);
+      if(target.waiters===0&&target.controller&&!target.controller.signal.aborted)target.controller.abort();
+    };
+    if(!sig)return target.pending.finally(release);
+    return new Promise((resolve,reject)=>{
+      const onAbort=()=>{release();const err=new Error('请求已取消');err.name='AbortError';reject(err);};
+      if(sig.aborted){onAbort();return;}
+      sig.addEventListener('abort',onAbort,{once:true});
+      target.pending.then(v=>{sig.removeEventListener('abort',onAbort);release();resolve(v);},e=>{sig.removeEventListener('abort',onAbort);release();reject(e);});
+    });
+  };
+  if(entry?.pending)return attachWaiter(entry,signal);
   entry||={data:null,bytes:0};this.entries.set(id,entry);
   const epoch=this.epoch,current=()=>epoch===this.epoch&&this.entries.get(id)===entry;
-  const assertCurrent=()=>{if(!current())throw unavailable();};
+  const controller=new AbortController();
+  entry.controller=controller;entry.waiters=0;
+  const assertCurrent=()=>{
+    if(controller.signal.aborted){const err=new Error('请求已取消');err.name='AbortError';throw err;}
+    if(!current())throw unavailable();
+  };
   entry.pending=(async()=>{
    const summary=await this.summary(id,provided,force);assertCurrent();
    const count=summary.stepCount===undefined?null:Number(summary.stepCount);if(count!==null&&(!Number.isSafeInteger(count)||count<0))throw new Error('会话统计分页数量无效');
@@ -60,10 +86,9 @@ export class TrajectoryReader {
      const associated=(gs.at(-1)?.stepIndices||[]).filter(i=>Number.isInteger(i)&&i>=0&&i<old.trajectory.steps.length&&!/USER_INPUT/.test(String(old.trajectory.steps[i]?.type||'')));
      stepOffset=associated.length?Math.min(...associated):old.trajectory.steps.length;
     }
-    // Background tools and in-flight compactions can finish after newer model
-    // requests or after summary.status becomes idle. Refresh from the earliest one.
-    const pendingStep=old.trajectory.steps.findIndex(s=>pendingCheckpoint(s)||(s?.metadata&&(s.metadata.startedAt||s.metadata.createdAt)&&!s.metadata.completedAt&&
-     (/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type||''))||s.metadata.toolCall)));
+    // Background tools, active planners and in-flight compactions can finish after
+    // newer model requests or after summary.status becomes idle. Refresh from the earliest one.
+    const pendingStep=old.trajectory.steps.findIndex(s=>pendingCheckpoint(s)||pendingPlanner(s)||pendingTool(s));
     if(pendingStep>=0)stepOffset=Math.min(stepOffset,pendingStep);
     if(gs.some(g=>!Array.isArray(g.stepIndices)||!g.stepIndices.length))metadataOffset=0;
    }
@@ -74,18 +99,22 @@ export class TrajectoryReader {
     for(const item of items){bytes+=Buffer.byteLength(JSON.stringify(item))+1;if(bytes>this.budgetBytes)throw new Error('会话统计数据超过内存预算');target.push(item);}
    };
    const check=()=>{assertCurrent();if(this.client.now()>deadline)throw new Error('会话统计分页读取超时');};
-   while(count===null||steps.length<count){
-    check();const page=await this.client.call('GetCascadeTrajectorySteps',{cascadeId:id,stepOffset:steps.length,trajectoryVerbosity:3});check();
-    const items=page.steps||[];if(!Array.isArray(items))throw new Error('会话统计分页格式无效');
-    if(!items.length){if(count===null)break;throw new Error('完整会话统计分页暂不可用');}append(steps,items);
-   }
-   // Full step semantics retain the tool-only timing markers. Their text and
-   // large tool payloads are discarded by the streaming projector.
-   for(;;){
-    check();const page=await this.client.call('GetCascadeTrajectoryGeneratorMetadata',{cascadeId:id,generatorMetadataOffset:generators.length,includeMessages:false});check();
-    const items=page.generatorMetadata||page.generatorMetadatas||[];if(!Array.isArray(items))throw new Error('会话统计分页格式无效');
-    if(!items.length)break;append(generators,items);
-   }
+   const fetchSteps=async()=>{
+    while(count===null||steps.length<count){
+     check();const page=await this.client.call('GetCascadeTrajectorySteps',{cascadeId:id,stepOffset:steps.length,trajectoryVerbosity:3},true,controller.signal);check();
+     const items=page.steps||[];if(!Array.isArray(items))throw new Error('会话统计分页格式无效');
+     if(!items.length){if(count===null)break;throw new Error('完整会话统计分页暂不可用');}append(steps,items);
+    }
+   };
+   const fetchGenerators=async()=>{
+    for(;;){
+     check();const page=await this.client.call('GetCascadeTrajectoryGeneratorMetadata',{cascadeId:id,generatorMetadataOffset:generators.length,includeMessages:false},true,controller.signal);check();
+     const items=page.generatorMetadata||page.generatorMetadatas||[];if(!Array.isArray(items))throw new Error('会话统计分页格式无效');
+     if(!items.length)break;append(generators,items);
+    }
+   };
+   // Fetch steps and generator metadata concurrently to halve cold-load latency.
+   await Promise.all([fetchSteps(),fetchGenerators()]);
    // A growing host may return newer metadata than the step-count snapshot.
    // Do not cache or persist a mixed/incomplete revision.
    if(generators.some(g=>(g.stepIndices||[]).some(i=>Number.isInteger(i)&&i>=steps.length)))throw new Error('会话仍在更新，请等待下一次刷新');
@@ -94,7 +123,9 @@ export class TrajectoryReader {
    entry.data=value;entry.summary=summary;entry.mark=mark;entry.verifiedAt=this.client.now();this.entries.delete(id);this.entries.set(id,entry);
    this.trim(id);
    return value;
-  })().finally(()=>{entry.pending=null;if(!entry.data&&current())this.entries.delete(id);if(current())this.trim(id);});
-  return entry.pending;
+  })().finally(()=>{entry.pending=null;entry.controller=null;if(!entry.data&&current())this.entries.delete(id);if(current())this.trim(id);});
+  // Suppress unhandled rejection when all waiters abort before settlement.
+  entry.pending.catch(()=>{});
+  return attachWaiter(entry,signal);
  }
 }

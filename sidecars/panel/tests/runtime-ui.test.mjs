@@ -275,3 +275,38 @@ test('takeover during attachment removes old preload and leaves no retained conn
   assert.equal(connections[0].calls.some(call=>call.method==='Runtime.evaluate'),false);
   await ui.stop();
 });
+
+test('rapid metrics switching supersedes stale bridge calls and aborts superseded backend snapshots',async()=>{
+  const window={};window.top=window;const sent=[];
+  window.__agPulseRuntimeCallV4=payload=>sent.push(JSON.parse(payload));
+  const source=makeRendererSource('module.exports = function(){return {};};','module.exports = function(){};');
+  runInNewContext(source,{window,setTimeout,clearTimeout});
+  const calls=[];
+  for(let i=0;i<12;i++)calls.push(window.agPulseHost.getMetrics({conversationId:`00000000-0000-0000-0000-${String(i).padStart(12,'0')}`,sessionOnly:true}));
+  const earlier=await Promise.all(calls.slice(0,11));
+  assert.ok(earlier.every(r=>r.superseded===true),'Earlier rapid switches supersede instead of hitting pending limit');
+  window.__agPulseRuntimeBridge.resolve(sent[11].id,{connection:'live',partial:true,speed:{tps:80}});
+  const latest=await calls[11];
+  assert.equal(latest.connection,'live');assert.equal(latest.speed.tps,80);
+  window.__agPulseRuntimeBridge.dispose();
+
+  const {ui,connections}=fixture();
+  const signals=[];const resolvers=[];
+  ui.snapshot=(input,{signal})=>{
+    signals.push(signal);
+    return new Promise(resolve=>resolvers.push(()=>resolve({connection:'live',input})));
+  };
+  await ui.tick();const c=connections[0];
+  const p1=ui.event(c,{method:'Runtime.bindingCalled',params:{name:ui.binding,executionContextId:7,payload:JSON.stringify({id:1,type:'metrics',input:{conversationId:'11111111-1111-1111-1111-111111111111',sessionOnly:true}})}});
+  const p2=ui.event(c,{method:'Runtime.bindingCalled',params:{name:ui.binding,executionContextId:7,payload:JSON.stringify({id:2,type:'metrics',input:{conversationId:'22222222-2222-2222-2222-222222222222',preferCached:true,sessionOnly:true}})}});
+  await new Promise(r=>setImmediate(r));
+  assert.equal(signals.length,2);
+  assert.equal(signals[0].aborted,true);
+  assert.equal(signals[1].aborted,false);
+  resolvers[0]();resolvers[1]();
+  await Promise.all([p1,p2]);
+  const resolvedIds=c.calls.filter(x=>x.method==='Runtime.evaluate'&&x.params.expression?.includes('?.resolve(')).map(x=>x.params.expression);
+  assert.equal(resolvedIds.some(e=>e.includes('resolve(1,')),false);
+  assert.equal(resolvedIds.some(e=>e.includes('resolve(2,')),true);
+  await ui.stop();
+});

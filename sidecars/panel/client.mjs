@@ -110,24 +110,32 @@ export class AntigravityClient {
     return this.server;
   }
 
-  async call(method, body = {}, retry = true) {
+  async call(method, body = {}, retry = true, signal = null) {
+    if (signal?.aborted) { const err = new Error('请求已取消'); err.name = 'AbortError'; throw err; }
     const server = await this.discover();
+    if (signal?.aborted) { const err = new Error('请求已取消'); err.name = 'AbortError'; throw err; }
     try {
       return await new Promise((resolve, reject) => {
         const data = JSON.stringify(body);
         const projection=['GetCascadeTrajectory','GetCascadeTrajectorySteps','GetCascadeTrajectoryGeneratorMetadata'].includes(method);
         const started=this.now();
+        let settled=false;
+        const onAbort=()=>{
+          if(settled)return;settled=true;
+          const err=new Error('请求已取消');err.name='AbortError';
+          reject(err);req.destroy();
+        };
         // A rejected stream destroys its socket. Do not leave that socket in
         // the shared agent where an immediate quota refresh could reuse it.
         const req = request({ hostname: '127.0.0.1', port: server.port, method: 'POST', path: SERVICE + method, ...(projection?{agent:false}:{}),
           headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1', 'x-codeium-csrf-token': server.csrf, 'Content-Length': Buffer.byteLength(data) } }, res => {
           const projected=projection?new TrajectoryJson():null;
-          let text = '',bytes=0,failed=false;
-          const fail=error=>{if(failed)return;failed=true;reject(error);req.destroy();};
+          let text = '',bytes=0;
+          const fail=error=>{if(settled)return;settled=true;reject(error);req.destroy();};
           res.setEncoding('utf8');
-          res.on('error',error=>{if(!failed){failed=true;reject(error);}});
+          res.on('error',error=>{if(!settled){settled=true;reject(error);}});
           res.on('data', chunk => {
-            if(failed)return;bytes+=Buffer.byteLength(chunk);
+            if(settled)return;bytes+=Buffer.byteLength(chunk);
             // Projected streams have no whole-response byte ceiling. The
             // retained statistics budget, parser depth and time bound work.
             if(!(projected&&res.statusCode===200)&&bytes>32*1024*1024){fail(new Error('接口响应超过采集上限'));return;}
@@ -135,32 +143,38 @@ export class AntigravityClient {
             catch(error){fail(error);}
           });
           res.on('end', () => {
-            if(failed)return;
-            if (res.statusCode !== 200) return reject(Object.assign(new Error(`Antigravity 接口 ${method} 返回 ${res.statusCode}`),{status:res.statusCode}));
+            if(settled)return;
+            if (res.statusCode !== 200) { settled=true; return reject(Object.assign(new Error(`Antigravity 接口 ${method} 返回 ${res.statusCode}`),{status:res.statusCode})); }
             try {
               const value=projected?projected.end():JSON.parse(text);
               try{this.onRpc?.({method,bytes,retainedBytes:projected?.retained??Buffer.byteLength(text),ms:this.now()-started});}catch{}
               if(method==='GetAllCascadeTrajectories'&&!this.profile&&this.localSummaries){
                 Promise.resolve(this.localSummaries()).then(local=>{
+                  if(settled)return;
                   if(local&&typeof local==='object')value.trajectorySummaries={...local,...(value.trajectorySummaries||{})};
-                  resolve(value);
-                }).catch(()=>resolve(value));
+                  settled=true;resolve(value);
+                }).catch(()=>{if(!settled){settled=true;resolve(value);}});
                 return;
               }
-              resolve(value);
+              settled=true;resolve(value);
             }
-            catch(error) { reject(projected?error:new Error('Antigravity 接口返回了无法解析的数据')); }
+            catch(error) { settled=true;reject(projected?error:new Error('Antigravity 接口返回了无法解析的数据')); }
           });
         });
-        req.on('error', reject);
-        const failTimeout=()=>{const err=new Error('Antigravity 本地接口超时');reject(err);req.destroy();};
+        req.on('error', err=>{if(!settled){settled=true;reject(err);}});
+        const failTimeout=()=>{if(settled)return;settled=true;const err=new Error('Antigravity 本地接口超时');reject(err);req.destroy();};
         req.setTimeout(12000, failTimeout);
         // Bound wall time as well as idle time for slow large streams.
         const deadline=setTimeout(failTimeout,30000);deadline.unref();
-        req.once('close',()=>clearTimeout(deadline));
+        if(signal){
+          if(signal.aborted){onAbort();return;}
+          signal.addEventListener('abort',onAbort,{once:true});
+        }
+        req.once('close',()=>{clearTimeout(deadline);signal?.removeEventListener('abort',onAbort);});
         req.end(data);
       });
     } catch (error) {
+      if (error?.name === 'AbortError' || signal?.aborted) throw error;
       // A missing historical cascade, busy API or malformed response does not
       // prove the process/credential changed. Do not launch CIM scans for it.
       const endpointLost=[401,403].includes(error.status)||['ECONNREFUSED','ECONNRESET','EPIPE','ENOTCONN'].includes(error.code);
@@ -170,7 +184,7 @@ export class AntigravityClient {
         this.server=null;this.discoveryError=error;
         this.retryAt=Math.max(this.retryAt,this.lastScanAt+3000);
       }
-      if(retry){await this.discover();return this.call(method,body,false);}
+      if(retry){await this.discover();return this.call(method,body,false,signal);}
       throw error;
     }
   }

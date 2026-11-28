@@ -95,17 +95,26 @@ test('a real HTTP step page above the old 32 MiB cap restores all metrics withou
  assert.equal(trajectoryMetrics(raw).tps,100);assert.equal(trajectoryMetrics(raw).cache.hitRate,.75);
  console.log(JSON.stringify({longConversationRegression:true,wireBytes,retainedBytes:Buffer.byteLength(JSON.stringify(raw)),context:trajectoryMetrics(raw).context.usedTokens,cache:trajectoryMetrics(raw).cache.hitRate}));
 });
-test('running PLANNER_RESPONSE projects live thinking+response+toolCalls streamBytes without retaining private text',()=>{
+test('running/generating PLANNER_RESPONSE projects live streamBytes and incomplete CLEARED tools preserve status while completed tools strip status',()=>{
  const runningRaw={status:'CASCADE_RUN_STATUS_RUNNING',trajectory:{cascadeId:id,steps:[
   {type:'CORTEX_STEP_TYPE_USER_INPUT',userInput:{text:'SECRET PROMPT'}},
-  {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',status:'CORTEX_STEP_STATUS_RUNNING',
+  {type:'CORTEX_STEP_TYPE_GENERIC',status:'CORTEX_STEP_STATUS_CLEARED',
+   metadata:{createdAt:'2026-11-24T11:10:28Z',startedAt:'2026-11-24T11:10:51Z',toolCall:{args:'SECRET CLEARED'}},},
+  {type:'CORTEX_STEP_TYPE_RUN_COMMAND',status:'CORTEX_STEP_STATUS_DONE',
+   metadata:{createdAt:'2026-11-27T13:35:40Z',startedAt:'2026-11-27T13:35:41Z',completedAt:'2026-11-27T13:35:43Z',toolCall:{args:'SECRET DONE'}}},
+  {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',status:'CORTEX_STEP_STATUS_GENERATING',
    metadata:{createdAt:'2026-11-27T13:35:44Z',viewableAt:'2026-11-27T13:35:50Z'},
    plannerResponse:{thinking:'SECRET THINKING 思考链',response:'SECRET REPLY 回复',toolCalls:[{name:'edit_file',args:'SECRET CODE'}]}},
  ],generatorMetadata:[]}};
  const projected=project(JSON.stringify(runningRaw),17);
  assert.equal(JSON.stringify(projected).includes('SECRET'),false);
+ assert.equal(projected.trajectory.steps[1].status,'CORTEX_STEP_STATUS_CLEARED');
+ assert.equal(projected.trajectory.steps[2].status,undefined);
+ assert.equal(projected.trajectory.steps[3].status,'CORTEX_STEP_STATUS_GENERATING');
  const mProj=trajectoryMetrics(projected),mRaw=trajectoryMetrics(runningRaw);
  assert.deepEqual(mProj,mRaw);
+ assert.equal(mProj.liveTiming.activeToolStartedAt,null);
+ assert.equal(mProj.liveTiming.activeModelStartedAt,'2026-11-27T13:35:44.000Z');
  assert.ok(mProj.liveStream.bytes>30);
  assert.equal(mProj.liveStream.hasFirstToken,true);
 });

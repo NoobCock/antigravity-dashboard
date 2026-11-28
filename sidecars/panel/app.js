@@ -127,7 +127,7 @@ function updateLiveTiming() {
 }
 const effectiveAvgTps = speed => typeof speed?.outputTps === 'number' && Number.isFinite(speed.outputTps) ? speed.outputTps : (typeof speed?.tps === 'number' && Number.isFinite(speed.tps) ? speed.tps : null);
 const effectiveLatestTps = speed => typeof speed?.latestOutputTps === 'number' && Number.isFinite(speed.latestOutputTps) ? speed.latestOutputTps : (typeof speed?.latestTps === 'number' && Number.isFinite(speed.latestTps) ? speed.latestTps : null);
-const isModelGenerating = speed => Boolean(speed?.liveTiming?.isRunning && speed?.liveTiming?.activeModelStartedAt && !speed?.liveTiming?.activeToolStartedAt);
+const isModelGenerating = speed => Boolean(speed?.liveTiming?.isRunning && (speed?.liveStream || (speed?.liveTiming?.activeModelStartedAt && !speed?.liveTiming?.activeToolStartedAt)));
 
 function seedTpsSeries(speed) {
   if (!speed) return;

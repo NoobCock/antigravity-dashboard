@@ -32,9 +32,9 @@ const owner=ownership.token,source=makeRendererSource(...files.slice(0,3),owner,
 const adapter=`window.__agPulseSurface=(${extract(files[3])})();`;
 // Each workbench has its own bridge request ID and DOM conversation ID. Empty
 // composers request account quota only; no most-recent-conversation fallback.
-const snapshot=async input=>{
+const snapshot=async(input,{signal=null}={})=>{
   let value;
-  if(input.conversationId)value=await store.snapshot(input);
+  if(input.conversationId)value=await store.snapshot({...input,signal});
   else{
     try{
       const server=await client.discover();
@@ -43,17 +43,23 @@ const snapshot=async input=>{
       value={connection:'live',speed:null,groups:store.quota||[],quotaUpdatedAt:new Date(store.quotaAt).toISOString()};
     }catch{value={connection:'offline',speed:null,groups:[],error:'IDE local API unavailable'};}
   }
+  if(input.sessionOnly===true){
+    return {partial:true,connection:value.connection,error:value.error||null,sessionError:value.sessionError||null,serverTime:value.serverTime||new Date().toISOString(),speed:value.speed,persistenceError:value.persistenceError||null,enabled:true};
+  }
   if(input.force)void usage.sync();
   void pricingStore.refreshLive().catch(()=>{});
-  const pricingOptions=await pricingStore.options().catch(()=>null);
-  const pricingMeta=await pricingStore.meta().catch(()=>null);
+  const [pricingOptions,pricingMeta,prefs]=await Promise.all([
+    pricingStore.options().catch(()=>null),
+    pricingStore.meta().catch(()=>null),
+    preferences.snapshot(),
+  ]);
   const pricingKey=`${pricingMeta?.liveFetchedAt||''}:${JSON.stringify(pricingOptions?.overrides||{})}`;
   const usageSnapshot=await usage.snapshot({pricingOptions,pricingKey});
   const loaded=store.identity?await usage.ledger.records(store.identity).catch(()=>null):null;
   const quotaEstimate=await quotaEstimator.estimate({
     scope:store.identity,groups:value.groups,records:loaded?.records||[],activeModel:value.speed?.model||null,pricingOptions,pricingMeta,
   }).catch(()=>({groups:[],pricingMeta}));
-  return {...value,quotaEstimate,usage:usageSnapshot?{...usageSnapshot,quotaEstimate}:null,enabled:true,preferences:await preferences.snapshot()};
+  return {...value,quotaEstimate,usage:usageSnapshot?{...usageSnapshot,quotaEstimate}:null,enabled:true,preferences:prefs};
 };
 const ui=new RuntimeUi({profile,source:adapter+source,owner,owns:()=>ownership.isOwner(),preferences,pricing:pricingStore,snapshot,dataDir:data,targetOrigin:()=> 'vscode-file://vscode-app',
   discover:async()=>{const result=await ideTargets(profile);debugPort=result.port;await client.discover();return result.targets;}});

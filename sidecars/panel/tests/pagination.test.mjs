@@ -110,3 +110,58 @@ test('in-flight checkpoint bypasses idle cache and re-reads until completed',asy
  await client.trajectory(id);
  assert.deepEqual(state.calls.map(([m])=>m),['GetAllCascadeTrajectories']);
 });
+test('CLEARED tool steps without completedAt do not rewind incremental reads, while GENERATING planners are refreshed',async()=>{
+ const {client,state}=fixture();
+ state.steps=[
+  {type:'CORTEX_STEP_TYPE_USER_INPUT',i:0},
+  {type:'CORTEX_STEP_TYPE_GENERIC',status:'CORTEX_STEP_STATUS_CLEARED',metadata:{createdAt:'2026-11-24T11:10:28Z',startedAt:'2026-11-24T11:10:51Z',toolCall:true},i:1},
+  {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',status:'CORTEX_STEP_STATUS_DONE',metadata:{createdAt:'2026-11-28T05:36:53Z',finishedGeneratingAt:'2026-11-28T05:37:10Z'},i:2},
+  {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',status:'CORTEX_STEP_STATUS_GENERATING',metadata:{createdAt:'2026-11-28T05:37:19Z'},plannerResponse:{streamBytes:120},i:3},
+ ];
+ state.generators=[{stepIndices:[2]}];
+ state.summary=summary(4,'CASCADE_RUN_STATUS_RUNNING');
+ await client.trajectory(id);
+ state.steps[3]={type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE',status:'CORTEX_STEP_STATUS_GENERATING',metadata:{createdAt:'2026-11-28T05:37:19Z',viewableAt:'2026-11-28T05:37:26Z'},plannerResponse:{streamBytes:480},i:3};
+ state.calls=[];
+ const updated=await client.trajectory(id);
+ assert.equal(state.calls.find(([m])=>m==='GetCascadeTrajectorySteps')[1].stepOffset,2);
+ assert.equal(updated.trajectory.steps[3].plannerResponse.streamBytes,480);
+});
+test('aborting one waiter cancels only that caller while keeping shared waiters alive, and cancels RPC when no waiters remain',async()=>{
+ const {client,state}=fixture();const original=client.call.bind(client);let release,entered;
+ const begun=new Promise(r=>entered=r),gate=new Promise(r=>release=r);let first=true,abortedSignal=false;
+ client.call=async(m,b,retry,sig)=>{
+  if(m==='GetCascadeTrajectorySteps'&&first){
+   first=false;entered();
+   if(sig)sig.addEventListener('abort',()=>{abortedSignal=true;},{once:true});
+   await gate;
+  }
+  return original(m,b);
+ };
+ const ac1=new AbortController(),ac2=new AbortController();
+ const p1=client.trajectory(id,{signal:ac1.signal});
+ const p2=client.trajectory(id,{signal:ac2.signal});
+ await begun;
+ ac1.abort();
+ await assert.rejects(p1,e=>e.name==='AbortError');
+ assert.equal(abortedSignal,false,'Shared waiter keeps underlying RPC alive');
+ release();
+ const r2=await p2;
+ assert.equal(r2.trajectory.steps.length,4);
+ // Now abort the sole waiter: underlying signal aborts immediately
+ first=true;abortedSignal=false;
+ const gate2=new Promise(()=>{});
+ client.call=async(m,b,retry,sig)=>{
+  if(m==='GetCascadeTrajectorySteps'&&first){
+   first=false;
+   return new Promise((_,rej)=>{sig?.addEventListener('abort',()=>{abortedSignal=true;const e=new Error('aborted');e.name='AbortError';rej(e);},{once:true});void gate2;});
+  }
+  return original(m,b);
+ };
+ const ac3=new AbortController();
+ const p3=client.trajectory(id,{force:true,signal:ac3.signal});
+ await new Promise(r=>setTimeout(r,15));
+ ac3.abort();
+ await assert.rejects(p3,e=>e.name==='AbortError');
+ assert.equal(abortedSignal,true);
+});

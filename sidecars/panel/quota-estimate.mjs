@@ -181,6 +181,7 @@ export class QuotaEstimator {
     this.directory = directory;
     this.cache = new Map();
     this.writeQueue = Promise.resolve();
+    this.estimateCache = null;
   }
 
   file(scope) {
@@ -262,6 +263,31 @@ export class QuotaEstimator {
 
   async estimate({ scope = null, groups = [], records = [], activeModel = null, now = Date.now(), pricingOptions = null, pricingMeta = null } = {}) {
     if (!Array.isArray(groups) || !groups.length) return { groups: [], pricingMeta };
+    const groupsKey = JSON.stringify(groups.map(g => [
+      g?.id || '',
+      g?.windows?.['5h']?.remaining ?? null,
+      g?.windows?.['5h']?.resetAt || '',
+      g?.windows?.['5h']?.disabled === true,
+      g?.windows?.weekly?.remaining ?? null,
+      g?.windows?.weekly?.resetAt || '',
+      g?.windows?.weekly?.disabled === true,
+    ]));
+    const pricingKey = JSON.stringify([pricingMeta?.liveFetchedAt || '', pricingOptions?.overrides || null, pricingOptions?.liveModels ? Object.keys(pricingOptions.liveModels).length : 0]);
+    const recLen = Array.isArray(records) ? records.length : 0;
+    const lastRec = recLen ? records[recLen - 1] : null;
+    const lastRecKey = lastRec ? `${lastRec.id || ''}:${lastRec.at || ''}` : '';
+    const cached = this.estimateCache;
+    if (cached
+      && cached.scope === scope
+      && cached.recordsRef === records
+      && cached.recLen === recLen
+      && cached.lastRecKey === lastRecKey
+      && cached.activeModel === activeModel
+      && cached.groupsKey === groupsKey
+      && cached.pricingKey === pricingKey
+      && (now === cached.now || (now >= cached.now && now - cached.now < 15000))) {
+      return cached.result;
+    }
     const state = scope && HASH.test(scope) ? await this.load(scope) : { schema: 1, account: '', windows: {}, checkpoints: {} };
     const datedRecords = (records || []).filter(r => r && Number.isSafeInteger(r.at) && totalTokens(r) > 0);
     const activePricing = resolveModelPricing(activeModel, now, pricingOptions);
@@ -501,6 +527,8 @@ export class QuotaEstimator {
     });
 
     if (dirty && scope && HASH.test(scope)) this.persist(scope, state);
-    return { groups: estimatedGroups, pricingMeta };
+    const result = { groups: estimatedGroups, pricingMeta };
+    this.estimateCache = { scope, recordsRef: records, recLen, lastRecKey, activeModel, groupsKey, pricingKey, now, result };
+    return result;
   }
 }
